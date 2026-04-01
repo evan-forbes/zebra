@@ -978,6 +978,7 @@ async fn setup(
         latest_chain_tip.clone(),
         chain_tip_change.clone(),
         misbehavior_tx,
+        zebra_trace::Tracer::noop(),
     );
 
     // Pretend we're close to tip
@@ -990,6 +991,7 @@ async fn setup(
             chain_tip_change.clone(),
             peer_set.clone(),
             Some(submitblock_channel.receiver()),
+            zebra_trace::Tracer::noop(),
         )
         .in_current_span(),
     );
@@ -997,6 +999,7 @@ async fn setup(
     let tx_gossip_task_handle = tokio::spawn(gossip_mempool_transaction_id(
         transaction_subscriber.subscribe(),
         peer_set.clone(),
+        zebra_trace::Tracer::noop(),
     ));
 
     // Make sure there is an additional request broadcasting the

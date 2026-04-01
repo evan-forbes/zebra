@@ -1,0 +1,13 @@
+FROM rust:1.89.0-bookworm
+
+RUN apt-get -qq update && \
+    apt-get -qq install -y --no-install-recommends \
+    libclang-dev \
+    protobuf-compiler && \
+    rm -rf /var/lib/apt/lists/*
+
+WORKDIR /build
+COPY . .
+
+ARG FEATURES="default-release-binaries,internal-miner"
+RUN cargo build --locked --release --features "${FEATURES}" --package zebrad --bin zebrad

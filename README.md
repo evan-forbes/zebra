@@ -71,7 +71,9 @@ sudo pacman -S rust clang protobuf
 ```
 
 Note that the package `clang` includes `libclang` as well. The GCC version on
-Arch Linux has a broken build script in a `rocksdb` dependency. A workaround is:
+Arch Linux has a broken build script in a `rocksdb` dependency. The local Make
+targets below apply the workaround automatically. If you run `cargo` directly,
+set:
 
 ```sh
 export CXXFLAGS="$CXXFLAGS -include cstdint"
@@ -82,13 +84,20 @@ export CXXFLAGS="$CXXFLAGS -include cstdint"
 Once you have the dependencies in place, you can install Zebra with:
 
 ```sh
-cargo install --locked zebrad
+make install
 ```
 
 Alternatively, you can install it from GitHub:
 
 ```sh
 cargo install --git https://github.com/ZcashFoundation/zebra --tag v2.5.0 zebrad
+```
+
+For local development builds and tests, use:
+
+```sh
+make build
+make test
 ```
 
 You can start Zebra by running

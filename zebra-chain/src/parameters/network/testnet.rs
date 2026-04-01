@@ -1,6 +1,11 @@
 //! Types and implementation for Testnet consensus parameters
 
-use std::{collections::BTreeMap, fmt, sync::Arc};
+use std::{
+    collections::BTreeMap,
+    fmt,
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 
 use crate::{
     amount::{Amount, NonNegative},
@@ -9,7 +14,7 @@ use crate::{
         checkpoint::list::{CheckpointList, TESTNET_CHECKPOINTS},
         constants::{magics, SLOW_START_INTERVAL, SLOW_START_SHIFT},
         network::error::ParametersBuilderError,
-        network_upgrade::TESTNET_ACTIVATION_HEIGHTS,
+        network_upgrade::{TESTNET_ACTIVATION_HEIGHTS, TESTNET_MINIMUM_DIFFICULTY_START_HEIGHT},
         subsidy::{
             constants::mainnet,
             constants::testnet,
@@ -477,6 +482,10 @@ pub struct ParametersBuilder {
     lockbox_disbursements: Vec<(String, Amount<NonNegative>)>,
     /// Checkpointed block hashes and heights for this network.
     checkpoints: Arc<CheckpointList>,
+    /// The start height for the testnet minimum difficulty consensus rule
+    minimum_difficulty_start_height: Height,
+    /// Optional path to a hex-encoded genesis block file
+    genesis_block_path: Option<PathBuf>,
 }
 
 impl Default for ParametersBuilder {
@@ -516,6 +525,8 @@ impl Default for ParametersBuilder {
                 .parse()
                 .map(Arc::new)
                 .expect("must be able to parse checkpoints"),
+            minimum_difficulty_start_height: Height::MIN,
+            genesis_block_path: None,
         }
     }
 }
@@ -580,6 +591,12 @@ impl ParametersBuilder {
             .parse()
             .map_err(|_| ParametersBuilderError::InvalidGenesisHash)?;
         Ok(self)
+    }
+
+    /// Sets the path to a hex-encoded genesis block file.
+    pub fn with_genesis_block_path(mut self, path: PathBuf) -> Self {
+        self.genesis_block_path = Some(path);
+        self
     }
 
     /// Checks that the provided network upgrade activation heights are in the correct order, then
@@ -736,6 +753,12 @@ impl ParametersBuilder {
         self
     }
 
+    /// Sets the minimum difficulty start height to be used in the [`Parameters`] being built.
+    pub fn with_minimum_difficulty_start_height(mut self, height: Height) -> Self {
+        self.minimum_difficulty_start_height = height;
+        self
+    }
+
     /// Sets the `disable_pow` flag to be used in the [`Parameters`] being built.
     pub fn with_unshielded_coinbase_spends(
         mut self,
@@ -828,6 +851,8 @@ impl ParametersBuilder {
             post_blossom_halving_interval,
             lockbox_disbursements,
             checkpoints,
+            minimum_difficulty_start_height,
+            genesis_block_path,
         } = self;
         Parameters {
             network_name,
@@ -844,6 +869,8 @@ impl ParametersBuilder {
             post_blossom_halving_interval,
             lockbox_disbursements,
             checkpoints,
+            minimum_difficulty_start_height,
+            genesis_block_path,
         }
     }
 
@@ -890,6 +917,8 @@ impl ParametersBuilder {
             post_blossom_halving_interval,
             lockbox_disbursements,
             checkpoints: _,
+            minimum_difficulty_start_height: _,
+            genesis_block_path: _,
         } = Self::default();
 
         self.activation_heights == activation_heights
@@ -963,6 +992,12 @@ pub struct Parameters {
     lockbox_disbursements: Vec<(String, Amount<NonNegative>)>,
     /// List of checkpointed block heights and hashes
     checkpoints: Arc<CheckpointList>,
+    /// The start height for the testnet minimum difficulty consensus rule
+    minimum_difficulty_start_height: Height,
+    /// Optional path to a hex-encoded genesis block file.
+    /// When set, the node loads and commits this block at startup
+    /// instead of downloading genesis from peers.
+    genesis_block_path: Option<PathBuf>,
 }
 
 impl Default for Parameters {
@@ -970,6 +1005,7 @@ impl Default for Parameters {
     fn default() -> Self {
         Self {
             network_name: "Testnet".to_string(),
+            minimum_difficulty_start_height: TESTNET_MINIMUM_DIFFICULTY_START_HEIGHT,
             ..Self::build().finish()
         }
     }
@@ -1047,6 +1083,8 @@ impl Parameters {
             post_blossom_halving_interval,
             lockbox_disbursements: _,
             checkpoints: _,
+            minimum_difficulty_start_height: _,
+            genesis_block_path: _,
         } = Self::new_regtest(Default::default()).expect("default regtest parameters are valid");
 
         self.network_name == network_name
@@ -1104,6 +1142,16 @@ impl Parameters {
     /// Returns true if proof-of-work validation should be disabled for this network
     pub fn disable_pow(&self) -> bool {
         self.disable_pow
+    }
+
+    /// Returns the start height for the testnet minimum difficulty consensus rule
+    pub fn minimum_difficulty_start_height(&self) -> Height {
+        self.minimum_difficulty_start_height
+    }
+
+    /// Returns the optional path to a hex-encoded genesis block file
+    pub fn genesis_block_path(&self) -> Option<&Path> {
+        self.genesis_block_path.as_deref()
     }
 
     /// Returns true if this network should allow transactions with transparent outputs

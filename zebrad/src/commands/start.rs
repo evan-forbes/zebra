@@ -82,7 +82,9 @@ use tokio::{pin, select, sync::oneshot};
 use tower::{builder::ServiceBuilder, util::BoxService, ServiceExt};
 use tracing_futures::Instrument;
 
+use hex::FromHex;
 use zebra_chain::block::genesis::regtest_genesis_block;
+use zebra_chain::serialization::ZcashDeserializeInto;
 use zebra_consensus::router::BackgroundTaskHandles;
 use zebra_rpc::{methods::RpcImpl, server::RpcServer, SubmitBlockChannel};
 
@@ -153,6 +155,11 @@ impl StartCmd {
             .buffer(Self::state_buffer_bound())
             .service(state_service);
 
+        info!("initializing structured tracer");
+        let (tracer, mut tracer_handle) =
+            zebra_trace::Tracer::from_config(&config.structured_trace)
+                .expect("failed to initialize structured tracer");
+
         info!("initializing network");
         // The service that our node uses to respond to requests by peers. The
         // load_shed middleware ensures that we reduce the size of the peer set
@@ -179,6 +186,7 @@ impl StartCmd {
             inbound,
             latest_chain_tip.clone(),
             user_agent(),
+            tracer.clone(),
         )
         .await;
 
@@ -204,6 +212,7 @@ impl StartCmd {
             state.clone(),
             latest_chain_tip.clone(),
             misbehavior_sender.clone(),
+            tracer.clone(),
         );
 
         info!("initializing mempool");
@@ -216,6 +225,7 @@ impl StartCmd {
             latest_chain_tip.clone(),
             chain_tip_change.clone(),
             misbehavior_sender.clone(),
+            tracer.clone(),
         );
         let mempool = BoxService::new(mempool);
         let mempool = ServiceBuilder::new()
@@ -301,6 +311,7 @@ impl StartCmd {
                 chain_tip_change.clone(),
                 peer_set.clone(),
                 Some(submit_block_channel.receiver()),
+                tracer.clone(),
             )
             .in_current_span(),
         );
@@ -313,6 +324,7 @@ impl StartCmd {
             mempool::gossip_mempool_transaction_id(
                 mempool_transaction_subscriber.subscribe(),
                 peer_set.clone(),
+                tracer.clone(),
             )
             .in_current_span(),
         );
@@ -368,6 +380,37 @@ impl StartCmd {
             sync_status.clone(),
             chain_tip_change.clone(),
         );
+
+        if let Some(genesis_block_path) = config.network.network.genesis_block_path() {
+            if !syncer
+                .state_contains(config.network.network.genesis_hash())
+                .await?
+            {
+                info!(?genesis_block_path, "loading genesis block from file");
+                let hex_data = std::fs::read_to_string(genesis_block_path)
+                    .map_err(|e| eyre!("failed to read genesis block file: {e}"))?;
+                let block_bytes = <Vec<u8>>::from_hex(hex_data.trim())
+                    .map_err(|e| eyre!("genesis block file is not valid hex: {e}"))?;
+                let block: zebra_chain::block::Block = block_bytes
+                    .zcash_deserialize_into()
+                    .map_err(|e| eyre!("genesis block file does not contain a valid block: {e}"))?;
+                let genesis_block = Arc::new(block);
+
+                let committed_hash = block_verifier_router
+                    .clone()
+                    .oneshot(zebra_consensus::Request::Commit(genesis_block))
+                    .await
+                    .map_err(|e| eyre!("failed to verify genesis block from file: {e}"))?;
+
+                assert_eq!(
+                    committed_hash,
+                    config.network.network.genesis_hash(),
+                    "genesis block file hash must match configured genesis_hash"
+                );
+
+                info!(?committed_hash, "committed genesis block from file");
+            }
+        }
 
         info!("spawning syncer task");
         let syncer_task_handle = if is_regtest {
@@ -552,6 +595,9 @@ impl StartCmd {
         // startup tasks
         state_checkpoint_verify_handle.abort();
         old_databases_task_handle.abort();
+
+        // Flush and shut down the structured tracer
+        tracer_handle.stop();
 
         info!(
             "exiting Zebra: all tasks have been asked to stop, waiting for remaining tasks to finish"

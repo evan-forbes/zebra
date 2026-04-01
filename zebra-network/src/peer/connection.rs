@@ -144,6 +144,8 @@ impl Handler {
         msg: Message,
         cached_addrs: &mut Vec<MetaAddr>,
         transient_addr: Option<PeerSocketAddr>,
+        tracer: &zebra_trace::Tracer,
+        metrics_label: &str,
     ) -> Option<Message> {
         let mut ignored_msg = None;
         // TODO: can this be avoided?
@@ -301,6 +303,18 @@ impl Handler {
                 },
                 Message::Block(block),
             ) => {
+                zebra_trace::trace_event!(
+                    tracer,
+                    zebra_trace::schema::PeerMessage {
+                        direction: "in".to_string(),
+                        command: "block".to_string(),
+                        peer_addr: metrics_label.to_string(),
+                        message_bytes: Message::Block(block.clone()).wire_size(),
+                        block_hash: Some(block.hash().to_string()),
+                        block_height: block.coinbase_height().map(|height| height.0),
+                    }
+                );
+
                 // assumptions:
                 //   - the block messages are sent in a single continuous batch
                 //   - missing blocks are silently skipped
@@ -404,6 +418,21 @@ impl Handler {
                     .iter()
                     .all(|item| matches!(item, InventoryHash::Block(_))) =>
             {
+                zebra_trace::trace_event!(
+                    tracer,
+                    zebra_trace::schema::PeerMessage {
+                        direction: "in".to_string(),
+                        command: "inv".to_string(),
+                        peer_addr: metrics_label.to_string(),
+                        message_bytes: Message::Inv(items.clone()).wire_size(),
+                        block_hash: match &items[..] {
+                            [InventoryHash::Block(hash)] => Some(hash.to_string()),
+                            _ => None,
+                        },
+                        block_height: None,
+                    }
+                );
+
                 Handler::Finished(Ok(Response::BlockHashes(
                     block_hashes(&items[..]).collect(),
                 )))
@@ -614,6 +643,9 @@ where
     /// service to a request from this connection,
     /// or None if this connection hasn't yet received an overload error.
     last_overload_time: Option<Instant>,
+
+    /// Structured JSONL tracer for peer message events.
+    pub(super) tracer: zebra_trace::Tracer,
 }
 
 impl<S, Tx> fmt::Debug for Connection<S, Tx>
@@ -640,6 +672,7 @@ where
     Tx: Sink<Message, Error = SerializationError> + Unpin,
 {
     /// Return a new connection from its channels, services, shared state, and metadata.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         inbound_service: S,
         client_rx: futures::channel::mpsc::Receiver<ClientRequest>,
@@ -648,8 +681,11 @@ where
         connection_tracker: ConnectionTracker,
         connection_info: Arc<ConnectionInfo>,
         initial_cached_addrs: Vec<MetaAddr>,
+        tracer: zebra_trace::Tracer,
     ) -> Self {
         let metrics_label = connection_info.connected_addr.get_transient_addr_label();
+
+        let peer_tx = PeerTx::new(peer_tx, tracer.clone(), metrics_label.clone());
 
         Connection {
             connection_info,
@@ -659,11 +695,12 @@ where
             svc: inbound_service,
             client_rx: client_rx.into(),
             error_slot,
-            peer_tx: peer_tx.into(),
+            peer_tx,
             connection_tracker,
             metrics_label,
             last_metrics_state: None,
             last_overload_time: None,
+            tracer,
         }
     }
 }
@@ -876,7 +913,13 @@ where
                             let request_msg = match self.state {
                                 State::AwaitingResponse {
                                     ref mut handler, ..
-                                } => span.in_scope(|| handler.process_message(peer_msg, &mut self.cached_addrs, self.connection_info.connected_addr.get_transient_addr())),
+                                } => span.in_scope(|| handler.process_message(
+                                    peer_msg,
+                                    &mut self.cached_addrs,
+                                    self.connection_info.connected_addr.get_transient_addr(),
+                                    &self.tracer,
+                                    &self.metrics_label,
+                                )),
                                 _ => unreachable!("unexpected state after AwaitingResponse: {:?}, peer_msg: {:?}, client_receiver: {:?}",
                                                   self.state,
                                                   peer_msg,
@@ -1141,7 +1184,7 @@ where
                 // exact transactions we have isn't that important, so it's ok to drop arbitrary
                 // transaction hashes from our response.
                 if hashes.len() > max_tx_inv_in_message {
-                    debug!(inv_count = ?hashes.len(), ?MAX_TX_INV_IN_SENT_MESSAGE, "unusually large transaction ID gossip");
+                    debug!(inv_count = ?hashes.len(), ?MAX_TX_INV_IN_SENT_MESSAGE, "unusually large transaction   ID gossip");
                 }
 
                 let hashes = hashes.into_iter().take(max_tx_inv_in_message).map(Into::into).collect();
@@ -1188,6 +1231,18 @@ where
     async fn handle_message_as_request(&mut self, msg: Message) -> Option<Message> {
         trace!(?msg);
         debug!(state = %self.state, %msg, "received inbound peer message");
+
+        zebra_trace::trace_event!(
+            self.tracer,
+            zebra_trace::schema::PeerMessage {
+                direction: "in".to_string(),
+                command: msg.command().to_string(),
+                peer_addr: self.metrics_label.clone(),
+                message_bytes: msg.wire_size(),
+                block_hash: msg.single_block_hash().map(|hash| hash.to_string()),
+                block_height: msg.block_height(),
+            }
+        );
 
         self.update_state_metrics(format!("In::Msg::{}", msg.command()));
 
@@ -1275,11 +1330,29 @@ where
 
                 Consumed
             }
-            Message::Tx(ref transaction) => Request::PushTransaction(transaction.clone()).into(),
+            Message::Tx(ref transaction) => {
+                zebra_trace::trace_event!(
+                    self.tracer,
+                    zebra_trace::schema::TxPushed {
+                        hash: transaction.id.mined_id().to_string(),
+                        peer_addr: self.metrics_label.clone(),
+                    }
+                );
+                Request::PushTransaction(transaction.clone()).into()
+            }
             Message::Inv(ref items) => match &items[..] {
                 // We don't expect to be advertised multiple blocks at a time,
                 // so we ignore any advertisements of multiple blocks.
-                [InventoryHash::Block(hash)] => Request::AdvertiseBlock(*hash).into(),
+                [InventoryHash::Block(hash)] => {
+                    zebra_trace::trace_event!(
+                        self.tracer,
+                        zebra_trace::schema::BlockAdvertised {
+                            hash: hash.to_string(),
+                            peer_addr: self.metrics_label.clone(),
+                        }
+                    );
+                    Request::AdvertiseBlock(*hash).into()
+                }
 
                 // Some peers advertise invs with mixed item types.
                 // But we're just interested in the transaction invs.

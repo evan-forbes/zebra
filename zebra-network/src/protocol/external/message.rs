@@ -6,6 +6,7 @@ use chrono::{DateTime, Utc};
 
 use zebra_chain::{
     block::{self, Block},
+    serialization::ZcashSerialize,
     transaction::UnminedTx,
 };
 
@@ -529,6 +530,77 @@ impl fmt::Display for Message {
 }
 
 impl Message {
+    /// Returns this message's size on the wire, including the 24-byte Zcash message header, if it
+    /// can be computed accurately from the in-memory representation.
+    pub fn wire_size(&self) -> Option<usize> {
+        const HEADER_LEN: usize = 24;
+        const VERSION_FIELD_LEN: usize = std::mem::size_of::<u32>();
+
+        let body_len = match self {
+            Message::Version(_) => return None,
+            Message::Verack => 0,
+            Message::Ping(_) | Message::Pong(_) => 8,
+            Message::Reject {
+                message,
+                reason,
+                data,
+                ..
+            } => {
+                message.zcash_serialized_size()
+                    + 1
+                    + reason.zcash_serialized_size()
+                    + data.as_ref().map(|data| data.len()).unwrap_or(0)
+            }
+            Message::GetAddr => 0,
+            Message::Addr(_) => return None,
+            Message::GetBlocks { known_blocks, stop }
+            | Message::GetHeaders { known_blocks, stop } => {
+                VERSION_FIELD_LEN
+                    + known_blocks.zcash_serialized_size()
+                    + stop.unwrap_or(block::Hash([0; 32])).zcash_serialized_size()
+            }
+            Message::Inv(hashes) | Message::GetData(hashes) | Message::NotFound(hashes) => {
+                hashes.zcash_serialized_size()
+            }
+            Message::Headers(headers) => headers.zcash_serialized_size(),
+            Message::Block(block) => block.zcash_serialized_size(),
+            Message::Tx(transaction) => transaction.transaction.zcash_serialized_size(),
+            Message::Mempool => 0,
+            Message::FilterLoad { filter, .. } => {
+                filter.0.len()
+                    + std::mem::size_of::<u32>()
+                    + std::mem::size_of::<u32>()
+                    + std::mem::size_of::<u8>()
+            }
+            Message::FilterAdd { data } => data.len(),
+            Message::FilterClear => 0,
+        };
+
+        Some(body_len + HEADER_LEN)
+    }
+
+    /// Returns the single block hash carried by this message, if any.
+    pub fn single_block_hash(&self) -> Option<block::Hash> {
+        match self {
+            Message::Inv(items) | Message::GetData(items) | Message::NotFound(items) => {
+                match &items[..] {
+                    [InventoryHash::Block(hash)] => Some(*hash),
+                    _ => None,
+                }
+            }
+            Message::Block(block) => Some(block.hash()),
+            _ => None,
+        }
+    }
+
+    /// Returns the block height carried by this message, if it is a full block and the height is known.
+    pub fn block_height(&self) -> Option<u32> {
+        match self {
+            Message::Block(block) => block.coinbase_height().map(|height| height.0),
+            _ => None,
+        }
+    }
+
     /// Returns the Zcash protocol message command as a string.
     pub fn command(&self) -> &'static str {
         match self {

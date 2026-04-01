@@ -1,6 +1,6 @@
 //! Consensus parameters for each Zcash network.
 
-use std::{fmt, str::FromStr, sync::Arc};
+use std::{fmt, path::Path, str::FromStr, sync::Arc};
 
 use thiserror::Error;
 
@@ -183,6 +183,14 @@ impl Network {
             params.is_default_testnet()
         } else {
             false
+        }
+    }
+
+    /// Returns the optional path to a hex-encoded genesis block file.
+    pub fn genesis_block_path(&self) -> Option<&Path> {
+        match self {
+            Network::Mainnet => None,
+            Network::Testnet(params) => params.genesis_block_path(),
         }
     }
 

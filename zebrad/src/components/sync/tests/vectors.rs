@@ -1068,6 +1068,7 @@ fn setup() -> (
         state_service.clone(),
         mock_chain_tip,
         misbehavior_tx,
+        zebra_trace::Tracer::noop(),
     );
 
     let chain_sync_future = chain_sync.sync();

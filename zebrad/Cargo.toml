@@ -156,6 +156,7 @@ zebra-network = { path = "../zebra-network", version = "4.0.0" }
 zebra-node-services = { path = "../zebra-node-services", version = "3.0.0", features = ["rpc-client"] }
 zebra-rpc = { path = "../zebra-rpc", version = "5.0.0" }
 zebra-state = { path = "../zebra-state", version = "4.0.0" }
+zebra-trace = { path = "../zebra-trace", version = "1.0.0" }
 # zebra-script is not used directly, but we list it here to enable the
 # "comparison-interpreter" feature. (Feature unification will take care of
 # enabling it in the other imports of zcash-script.)
@@ -205,6 +206,7 @@ hyper-util = { workspace = true, features = ["service", "server", "tokio"] }
 # Configuration management
 config = { workspace = true }
 
+hex = { workspace = true }
 num-integer = { workspace = true }
 rand = { workspace = true }
 

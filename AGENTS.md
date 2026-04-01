@@ -79,13 +79,18 @@ Code is primarily in each crate's `src/`; integration tests are in `*/tests/`; m
 All of these must pass before submitting a PR:
 
 ```bash
-# Optional full build check
-cargo build --workspace --locked
+# Optional full build check.
+# On Arch/GCC, prefer the Make targets because they inject the RocksDB
+# `CXXFLAGS=-include cstdint` workaround used by local builds.
+make build
 
 # All three must pass before any PR
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings
-cargo test --workspace
+make test
+
+# Install the local zebrad binary
+make install
 
 # Run a single crate's tests
 cargo test -p zebra-chain
@@ -100,6 +105,9 @@ cargo nextest run --profile all-tests --locked --release --features default-rele
 # Run with nextest (integration profiles)
 cargo nextest run --profile sync-large-checkpoints-empty
 ```
+
+`make install-kresko` intentionally remains separate because it builds the
+Ubuntu-compatible binary in Docker and does not use the local RocksDB toolchain.
 
 ## Commit & Pull Request Guidelines
 

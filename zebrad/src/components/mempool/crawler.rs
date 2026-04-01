@@ -78,10 +78,12 @@ const FANOUT: usize = 3;
 ///
 /// This should be less than the target block interval,
 /// so that we crawl peer mempools at least once per block.
+/// The crawler is mainly a fallback for transactions missed by direct gossip,
+/// so a moderate interval is sufficient.
 ///
 /// Using a prime number makes sure that mempool crawler fanouts
 /// don't synchronise with other crawls.
-pub const RATE_LIMIT_DELAY: Duration = Duration::from_secs(73);
+pub const RATE_LIMIT_DELAY: Duration = Duration::from_secs(67);
 
 /// The time to wait for a peer response.
 ///

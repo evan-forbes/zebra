@@ -607,6 +607,8 @@ struct DTestnetParameters {
     /// If `true`, automatically repeats configured funding stream addresses to fill
     /// all required periods.
     extend_funding_stream_addresses_as_required: Option<bool>,
+    minimum_difficulty_start_height: Option<u32>,
+    genesis_block_path: Option<String>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -675,6 +677,10 @@ impl From<Arc<testnet::Parameters>> for DTestnetParameters {
                 params.checkpoints().into()
             },
             extend_funding_stream_addresses_as_required: None,
+            minimum_difficulty_start_height: Some(params.minimum_difficulty_start_height().0),
+            genesis_block_path: params
+                .genesis_block_path()
+                .map(|p| p.to_string_lossy().into_owned()),
         }
     }
 }
@@ -802,6 +808,8 @@ impl<'de> Deserialize<'de> for Config {
                     lockbox_disbursements,
                     checkpoints,
                     extend_funding_stream_addresses_as_required,
+                    minimum_difficulty_start_height,
+                    genesis_block_path,
                 }),
             ) => {
                 let mut params_builder = testnet::Parameters::build();
@@ -883,6 +891,17 @@ impl<'de> Deserialize<'de> for Config {
 
                 if let Some(true) = extend_funding_stream_addresses_as_required {
                     params_builder = params_builder.extend_funding_streams();
+                }
+
+                if let Some(height) = minimum_difficulty_start_height {
+                    params_builder = params_builder.with_minimum_difficulty_start_height(
+                        height.try_into().map_err(de::Error::custom)?,
+                    );
+                }
+
+                if let Some(genesis_block_path) = genesis_block_path {
+                    params_builder =
+                        params_builder.with_genesis_block_path(genesis_block_path.into());
                 }
 
                 // Return an error if the initial testnet peers includes any of the default initial Mainnet or Testnet

@@ -15,7 +15,7 @@ use zebra_network as zn;
 use zebra_node_services::mempool::MempoolChange;
 
 use crate::{
-    components::sync::{PEER_GOSSIP_DELAY, TIPS_RESPONSE_TIMEOUT},
+    components::sync::TIPS_RESPONSE_TIMEOUT,
     BoxError,
 };
 
@@ -29,6 +29,7 @@ pub const MAX_CHANGES_BEFORE_SEND: usize = 10;
 pub async fn gossip_mempool_transaction_id<ZN>(
     mut receiver: broadcast::Receiver<MempoolChange>,
     broadcast_network: ZN,
+    tracer: zebra_trace::Tracer,
 ) -> Result<(), BoxError>
 where
     ZN: Service<zn::Request, Response = zn::Response, Error = BoxError> + Send + Clone + 'static,
@@ -68,12 +69,9 @@ where
             }
         };
 
-        // also combine transaction IDs that arrived shortly after this one,
-        // but limit the number of changes and the number of transaction IDs
-        // (the network layer handles the actual limits, this just makes sure the loop terminates)
-        //
-        // TODO: If some amount of time passes (300ms?) before reaching MAX_CHANGES_BEFORE_SEND or
-        //       max_tx_inv_in_message, flush messages anyway.
+        // Drain any transaction IDs that are already buffered in the channel,
+        // so we can batch them into a single broadcast message.
+        // `try_recv()` is non-blocking: it returns immediately when the channel is empty.
         while combined_changes <= MAX_CHANGES_BEFORE_SEND && txs.len() < max_tx_inv_in_message {
             match receiver.try_recv() {
                 Ok(mempool_change) if mempool_change.is_added() => {
@@ -95,6 +93,26 @@ where
         }
 
         let txs_len = txs.len();
+
+        // Capture txids for tracing before the move
+        if tracer.is_collecting() {
+            let max_ids = 32;
+            let truncated = txs_len > max_ids;
+            let txids: Vec<String> = txs
+                .iter()
+                .take(max_ids)
+                .map(|id| id.mined_id().to_string())
+                .collect();
+            zebra_trace::trace_event!(
+                tracer,
+                zebra_trace::schema::TxGossiped {
+                    tx_count: txs_len,
+                    txids: txids,
+                    truncated: truncated,
+                }
+            );
+        }
+
         let request = zn::Request::AdvertiseTransactionIds(txs);
 
         info!(%request, changes = %combined_changes, "sending mempool transaction broadcast");
@@ -108,11 +126,5 @@ where
         let _ = broadcast_network.ready().await?.call(request).await;
 
         metrics::counter!("mempool.gossiped.transactions.total").increment(txs_len as u64);
-
-        // wait for at least the network timeout between gossips
-        //
-        // in practice, transactions arrive every 1-20 seconds,
-        // so waiting 6 seconds can delay transaction propagation, in order to reduce peer load
-        tokio::time::sleep(PEER_GOSSIP_DELAY).await;
     }
 }

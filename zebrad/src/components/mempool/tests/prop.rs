@@ -294,6 +294,7 @@ fn setup(
         latest_chain_tip,
         chain_tip_change,
         misbehavior_tx,
+        zebra_trace::Tracer::noop(),
     );
 
     let mut transaction_receiver = mempool_transaction_subscriber.subscribe();

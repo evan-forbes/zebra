@@ -7259,6 +7259,7 @@ dependencies = [
  "tracing-futures",
  "zebra-chain",
  "zebra-test",
+ "zebra-trace",
 ]
 
 [[package]]
@@ -7422,6 +7423,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "zebra-trace"
+version = "1.0.0"
+dependencies = [
+ "crossbeam-channel",
+ "humantime",
+ "rand 0.8.5",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tracing",
+ "zebra-chain",
+]
+
+[[package]]
 name = "zebra-utils"
 version = "4.0.0"
 dependencies = [
@@ -7520,6 +7535,7 @@ dependencies = [
  "zebra-script",
  "zebra-state",
  "zebra-test",
+ "zebra-trace",
  "zebra-utils",
 ]
 

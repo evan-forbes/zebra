@@ -83,6 +83,9 @@ pub struct ZebradConfig {
     /// See the Zebra Book for details and examples:
     /// <https://zebra.zfnd.org/user/health.html>
     pub health: crate::components::health::Config,
+
+    /// Structured JSONL trace configuration.
+    pub structured_trace: zebra_trace::TracerConfig,
 }
 
 impl ZebradConfig {

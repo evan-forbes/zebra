@@ -86,6 +86,7 @@ proptest = { workspace = true, optional = true }
 proptest-derive = { workspace = true, optional = true }
 
 zebra-chain = { path = "../zebra-chain", version = "5.0.0", features = ["async-error"] }
+zebra-trace = { path = "../zebra-trace", version = "1.0.0" }
 
 [dev-dependencies]
 proptest = { workspace = true }

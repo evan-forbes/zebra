@@ -52,6 +52,7 @@ pub async fn gossip_best_tip_block_hashes<ZN>(
     mut chain_state: ChainTipChange,
     broadcast_network: ZN,
     mut mined_block_receiver: Option<mpsc::Receiver<(block::Hash, block::Height)>>,
+    tracer: zebra_trace::Tracer,
 ) -> Result<(), BlockGossipError>
 where
     ZN: Service<zn::Request, Response = zn::Response, Error = BoxError> + Send + Clone + 'static,
@@ -135,6 +136,16 @@ where
         };
 
         info!(?height, ?request, log_msg);
+
+        zebra_trace::trace_event!(
+            tracer,
+            zebra_trace::schema::BlockGossiped {
+                hash: hash.to_string(),
+                height: height.0,
+                is_mined: is_block_submission,
+            }
+        );
+
         let broadcast_fut = broadcast_network
             .ready()
             .await

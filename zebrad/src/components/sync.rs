@@ -266,6 +266,13 @@ pub struct Config {
     /// If the number of logical cores can't be detected, Zebra uses one thread.
     /// For details, see [the `rayon` documentation](https://docs.rs/rayon/latest/rayon/struct.ThreadPoolBuilder.html#method.num_threads).
     pub parallel_cpu_threads: usize,
+
+    /// How long Zebra waits before restarting a sync run after it finishes.
+    ///
+    /// This should be long enough to let stale peer hints and old in-flight downloads
+    /// drain, but can be lowered for short-lived local testnets.
+    #[serde(with = "humantime_serde")]
+    pub sync_restart_delay: Duration,
 }
 
 impl Default for Config {
@@ -294,6 +301,8 @@ impl Default for Config {
             // If this causes tokio executor starvation, move CPU-intensive tasks to rayon threads,
             // or reserve a few cores for tokio threads, based on `num_cpus()`.
             parallel_cpu_threads: 0,
+
+            sync_restart_delay: SYNC_RESTART_DELAY,
         }
     }
 }
@@ -342,6 +351,9 @@ where
     /// The configured full verification concurrency limit, after applying the minimum limit.
     full_verify_concurrency_limit: usize,
 
+    /// The configured delay between sync runs.
+    sync_restart_delay: Duration,
+
     // Services
     //
     /// A network service which is used to perform ObtainTips and ExtendTips
@@ -382,6 +394,9 @@ where
 
     /// Sender for reporting peer addresses that advertised unexpectedly invalid transactions.
     misbehavior_sender: mpsc::Sender<(PeerSocketAddr, u32)>,
+
+    /// Structured JSONL tracer.
+    tracer: zebra_trace::Tracer,
 }
 
 /// Polls the network to determine whether further blocks are available and
@@ -428,11 +443,13 @@ where
         state: ZS,
         latest_chain_tip: ZSTip,
         misbehavior_sender: mpsc::Sender<(PeerSocketAddr, u32)>,
+        tracer: zebra_trace::Tracer,
     ) -> (Self, SyncStatus) {
         let mut download_concurrency_limit = config.sync.download_concurrency_limit;
         let mut checkpoint_verify_concurrency_limit =
             config.sync.checkpoint_verify_concurrency_limit;
         let mut full_verify_concurrency_limit = config.sync.full_verify_concurrency_limit;
+        let sync_restart_delay = config.sync.sync_restart_delay;
 
         if download_concurrency_limit < MIN_CONCURRENCY_LIMIT {
             warn!(
@@ -481,7 +498,7 @@ where
             AlwaysHedge,
             20,
             0.95,
-            2 * SYNC_RESTART_DELAY,
+            2 * sync_restart_delay,
         );
 
         // We apply a timeout to the verifier to avoid hangs due to missing earlier blocks.
@@ -509,6 +526,7 @@ where
             max_checkpoint_height,
             checkpoint_verify_concurrency_limit,
             full_verify_concurrency_limit,
+            sync_restart_delay,
             tip_network,
             downloads,
             state,
@@ -517,6 +535,7 @@ where
             recent_syncs,
             past_lookahead_limit_receiver,
             misbehavior_sender,
+            tracer,
         };
 
         (new_syncer, sync_status)
@@ -537,11 +556,11 @@ where
             self.update_metrics();
 
             info!(
-                timeout = ?SYNC_RESTART_DELAY,
+                timeout = ?self.sync_restart_delay,
                 state_tip = ?self.latest_chain_tip.best_tip_height(),
                 "waiting to restart sync"
             );
-            sleep(SYNC_RESTART_DELAY).await;
+            sleep(self.sync_restart_delay).await;
         }
     }
 
@@ -565,7 +584,7 @@ where
             state_tip = ?self.latest_chain_tip.best_tip_height(),
             "starting sync, obtaining new tips"
         );
-        let mut extra_hashes = timeout(SYNC_RESTART_DELAY, self.obtain_tips())
+        let mut extra_hashes = timeout(self.sync_restart_delay, self.obtain_tips())
             .await
             .map_err(Into::into)
             // TODO: replace with flatten() when it stabilises (#70142)
@@ -989,7 +1008,7 @@ where
         while !self.state_contains(self.genesis_hash).await? {
             info!("starting genesis block download and verify");
 
-            let response = timeout(SYNC_RESTART_DELAY, self.request_genesis_once())
+            let response = timeout(self.sync_restart_delay, self.request_genesis_once())
                 .await
                 .map_err(Into::into);
 
@@ -1028,7 +1047,18 @@ where
     /// Fatal errors are returned in the outer result, temporary errors in the inner one.
     async fn request_genesis_once(
         &mut self,
-    ) -> Result<Result<(Height, block::Hash), BlockDownloadVerifyError>, Report> {
+    ) -> Result<
+        Result<
+            (
+                Height,
+                block::Hash,
+                Option<zebra_network::PeerSocketAddr>,
+                usize,
+            ),
+            BlockDownloadVerifyError,
+        >,
+        Report,
+    > {
         let response = self.downloads.download_and_verify(self.genesis_hash).await;
         Self::handle_response(response).map_err(|e| eyre!(e))?;
 
@@ -1102,11 +1132,29 @@ where
     #[allow(unknown_lints)]
     fn handle_block_response(
         &mut self,
-        response: Result<(Height, block::Hash), BlockDownloadVerifyError>,
+        response: Result<
+            (
+                Height,
+                block::Hash,
+                Option<zebra_network::PeerSocketAddr>,
+                usize,
+            ),
+            BlockDownloadVerifyError,
+        >,
     ) -> Result<(), BlockDownloadVerifyError> {
         match response {
-            Ok((height, hash)) => {
+            Ok((height, hash, advertiser_addr, size_bytes)) => {
                 trace!(?height, ?hash, "verified and committed block to state");
+
+                zebra_trace::trace_event!(
+                    self.tracer,
+                    zebra_trace::schema::BlockVerified {
+                        hash: hash.to_string(),
+                        height: height.0,
+                        peer_addr: advertiser_addr.map(|addr| addr.to_string()),
+                        size_bytes: Some(size_bytes),
+                    }
+                );
 
                 return Ok(());
             }

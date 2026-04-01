@@ -245,6 +245,9 @@ pub struct Mempool {
     /// Sender for reporting peer addresses that advertised unexpectedly invalid transactions.
     misbehavior_sender: mpsc::Sender<(PeerSocketAddr, u32)>,
 
+    /// Structured JSONL tracer.
+    tracer: zebra_trace::Tracer,
+
     // Diagnostics
     //
     /// Queued transactions pending download or verification transmitter.
@@ -279,6 +282,7 @@ impl Mempool {
         latest_chain_tip: zs::LatestChainTip,
         chain_tip_change: ChainTipChange,
         misbehavior_sender: mpsc::Sender<(PeerSocketAddr, u32)>,
+        tracer: zebra_trace::Tracer,
     ) -> (Self, MempoolTxSubscriber) {
         let (transaction_sender, _) =
             tokio::sync::broadcast::channel(gossip::MAX_CHANGES_BEFORE_SEND * 2);
@@ -296,6 +300,7 @@ impl Mempool {
             tx_verifier,
             transaction_sender,
             misbehavior_sender,
+            tracer,
             #[cfg(feature = "progress-bar")]
             queued_count_bar: None,
             #[cfg(feature = "progress-bar")]
@@ -610,6 +615,14 @@ impl Service<Request> for Mempool {
                         // mempool re-verifies all pending tx_downloads when there's a `TipAction::Reset`.
                         if best_tip_height == expected_tip_height {
                             let tx_id = tx.transaction.id;
+
+                            zebra_trace::trace_event!(
+                                self.tracer,
+                                zebra_trace::schema::TxVerified {
+                                    hash: tx_id.mined_id().to_string(),
+                                }
+                            );
+
                             let insert_result =
                                 storage.insert(tx, spent_mempool_outpoints, best_tip_height);
 
@@ -619,9 +632,22 @@ impl Service<Request> for Mempool {
                             );
 
                             if let Ok(inserted_id) = insert_result {
+                                zebra_trace::trace_event!(
+                                    self.tracer,
+                                    zebra_trace::schema::TxAddedToMempool {
+                                        hash: inserted_id.mined_id().to_string(),
+                                    }
+                                );
                                 // Save transaction ids that we will send to peers
                                 send_to_peers_ids.insert(inserted_id);
                             } else {
+                                zebra_trace::trace_event!(
+                                    self.tracer,
+                                    zebra_trace::schema::TxRejected {
+                                        hash: tx_id.mined_id().to_string(),
+                                        reason: format!("{insert_result:?}"),
+                                    }
+                                );
                                 invalidated_ids.insert(tx_id);
                             }
 
@@ -654,6 +680,14 @@ impl Service<Request> for Mempool {
                         };
 
                         tracing::debug!(?tx_id, ?error, "mempool transaction failed to verify");
+
+                        zebra_trace::trace_event!(
+                            self.tracer,
+                            zebra_trace::schema::TxRejected {
+                                hash: tx_id.mined_id().to_string(),
+                                reason: error.to_string(),
+                            }
+                        );
 
                         metrics::counter!("mempool.failed.verify.tasks.total", "reason" => error.to_string()).increment(1);
 

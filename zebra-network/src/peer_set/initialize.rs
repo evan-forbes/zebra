@@ -99,6 +99,7 @@ pub async fn init<S, C>(
     inbound_service: S,
     latest_chain_tip: C,
     user_agent: String,
+    tracer: zebra_trace::Tracer,
 ) -> (
     Buffer<BoxService<Request, Response, BoxError>, Request>,
     Arc<std::sync::Mutex<AddressBook>>,
@@ -190,6 +191,7 @@ where
             .with_user_agent(user_agent)
             .with_latest_chain_tip(latest_chain_tip.clone())
             .want_transactions(true)
+            .with_tracer(tracer)
             .finish()
             .expect("configured all required parameters");
         (

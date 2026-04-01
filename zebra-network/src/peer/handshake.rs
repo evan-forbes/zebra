@@ -77,6 +77,8 @@ where
     minimum_peer_version: MinimumPeerVersion<C>,
     nonces: Arc<futures::lock::Mutex<IndexSet<Nonce>>>,
 
+    tracer: zebra_trace::Tracer,
+
     parent_span: Span,
 }
 
@@ -116,6 +118,7 @@ where
             inv_collector: self.inv_collector.clone(),
             minimum_peer_version: self.minimum_peer_version.clone(),
             nonces: self.nonces.clone(),
+            tracer: self.tracer.clone(),
             parent_span: self.parent_span.clone(),
         }
     }
@@ -407,6 +410,7 @@ where
     address_book_updater: Option<tokio::sync::mpsc::Sender<MetaAddrChange>>,
     inv_collector: Option<broadcast::Sender<InventoryChange>>,
     latest_chain_tip: C,
+    tracer: zebra_trace::Tracer,
 }
 
 impl<S, C> Builder<S, C>
@@ -488,6 +492,7 @@ where
             user_agent: self.user_agent,
             relay: self.relay,
             inv_collector: self.inv_collector,
+            tracer: self.tracer,
         }
     }
 
@@ -496,6 +501,14 @@ where
     /// If this is unset, the node will not request transactions.
     pub fn want_transactions(mut self, relay: bool) -> Self {
         self.relay = Some(relay);
+        self
+    }
+
+    /// Provide a structured JSONL tracer. Optional.
+    ///
+    /// Defaults to a noop tracer.
+    pub fn with_tracer(mut self, tracer: zebra_trace::Tracer) -> Self {
+        self.tracer = tracer;
         self
     }
 
@@ -534,6 +547,7 @@ where
             inv_collector,
             minimum_peer_version,
             nonces,
+            tracer: self.tracer,
             parent_span: Span::current(),
         })
     }
@@ -558,6 +572,7 @@ where
             address_book_updater: None,
             inv_collector: None,
             latest_chain_tip: NoChainTip,
+            tracer: zebra_trace::Tracer::noop(),
         }
     }
 }
@@ -900,6 +915,7 @@ where
         let our_services = self.our_services;
         let relay = self.relay;
         let minimum_peer_version = self.minimum_peer_version.clone();
+        let tracer = self.tracer.clone();
 
         // # Security
         //
@@ -1129,6 +1145,7 @@ where
                 connection_tracker,
                 connection_info.clone(),
                 alternate_addrs.collect(),
+                tracer,
             );
 
             let connection_task = tokio::spawn(

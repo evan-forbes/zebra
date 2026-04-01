@@ -233,11 +233,11 @@ pub(crate) const CONSENSUS_BRANCH_IDS: &[(NetworkUpgrade, ConsensusBranchId)] = 
     (ZFuture, ConsensusBranchId(0xffffffff)),
 ];
 
-/// The target block spacing before Blossom.
-const PRE_BLOSSOM_POW_TARGET_SPACING: i64 = 150;
-
 /// The target block spacing after Blossom activation.
-pub const POST_BLOSSOM_POW_TARGET_SPACING: u32 = 75;
+pub const POST_BLOSSOM_POW_TARGET_SPACING: u32 = 10;
+
+/// The target block spacing before Blossom.
+const PRE_BLOSSOM_POW_TARGET_SPACING: i64 = (POST_BLOSSOM_POW_TARGET_SPACING as i64) * 2;
 
 /// The averaging window for difficulty threshold arithmetic mean calculations.
 ///
@@ -253,7 +253,7 @@ const TESTNET_MINIMUM_DIFFICULTY_GAP_MULTIPLIER: i32 = 6;
 /// The start height for the testnet minimum difficulty consensus rule.
 ///
 /// Based on <https://zips.z.cash/zip-0208#minimum-difficulty-blocks-on-the-test-network>
-const TESTNET_MINIMUM_DIFFICULTY_START_HEIGHT: block::Height = block::Height(299_188);
+pub(crate) const TESTNET_MINIMUM_DIFFICULTY_START_HEIGHT: block::Height = block::Height(299_188);
 
 /// The activation height for the block maximum time rule on Testnet.
 ///
@@ -441,9 +441,8 @@ impl NetworkUpgrade {
         height: block::Height,
     ) -> Option<Duration> {
         match (network, height) {
-            // TODO: Move `TESTNET_MINIMUM_DIFFICULTY_START_HEIGHT` to a field on testnet::Parameters (#8364)
-            (Network::Testnet(_params), height)
-                if height < TESTNET_MINIMUM_DIFFICULTY_START_HEIGHT =>
+            (Network::Testnet(params), height)
+                if height < params.minimum_difficulty_start_height() =>
             {
                 None
             }

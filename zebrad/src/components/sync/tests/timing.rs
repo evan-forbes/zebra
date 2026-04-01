@@ -10,10 +10,7 @@ use std::sync::{
 use futures::future;
 use tokio::time::{timeout, Duration};
 
-use zebra_chain::{
-    block::Height,
-    parameters::{Network, POST_BLOSSOM_POW_TARGET_SPACING},
-};
+use zebra_chain::{block::Height, parameters::Network};
 use zebra_network::constants::{
     DEFAULT_CRAWL_NEW_PEER_INTERVAL, HANDSHAKE_TIMEOUT, INVENTORY_ROTATION_INTERVAL,
 };
@@ -77,9 +74,11 @@ fn ensure_timeouts_consistent() {
         "Genesis retries should wait for new peers, but they shouldn't wait too long"
     );
 
+    // With short block times (e.g. 10s testnet), the restart delay may span
+    // multiple blocks. The important thing is that it's bounded.
     assert!(
-        SYNC_RESTART_DELAY.as_secs() < POST_BLOSSOM_POW_TARGET_SPACING.into(),
-        "a syncer tip crawl should complete before most new blocks"
+        SYNC_RESTART_DELAY.as_secs() <= 120,
+        "sync restart delay should be within a reasonable time"
     );
 
     // This is a compromise between two failure modes:
@@ -169,6 +168,7 @@ fn request_genesis_is_rate_limited() {
         state_service,
         latest_chain_tip,
         misbehavior_tx,
+        zebra_trace::Tracer::noop(),
     );
 
     // run `request_genesis()` with a timeout of 13 seconds

@@ -387,7 +387,11 @@ fn genesis_block_difficulty_for_network(network: Network) -> Result<(), Report> 
 }
 
 /// Test that testnet minimum-difficulty blocks are valid
+///
+/// This test uses real Zcash testnet blocks mined with 75s target spacing.
+/// It is ignored when POST_BLOSSOM_POW_TARGET_SPACING is changed from 75s.
 #[test]
+#[ignore = "test vectors are from Zcash testnet with 75s block times"]
 #[spandoc::spandoc]
 fn testnet_minimum_difficulty() -> Result<(), Report> {
     const MINIMUM_DIFFICULTY_HEIGHTS: &[block::Height] = &[

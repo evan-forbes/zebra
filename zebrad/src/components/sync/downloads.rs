@@ -26,6 +26,7 @@ use tracing_futures::Instrument;
 use zebra_chain::{
     block::{self, Height, HeightDiff},
     chain_tip::ChainTip,
+    serialization::ZcashSerialize,
 };
 use zebra_network::{self as zn, PeerSocketAddr};
 use zebra_state as zs;
@@ -217,7 +218,12 @@ where
     /// A list of pending block download and verify tasks.
     #[pin]
     pending: FuturesUnordered<
-        JoinHandle<Result<(Height, block::Hash), (BlockDownloadVerifyError, block::Hash)>>,
+        JoinHandle<
+            Result<
+                (Height, block::Hash, Option<PeerSocketAddr>, usize),
+                (BlockDownloadVerifyError, block::Hash),
+            >,
+        >,
     >,
 
     /// A list of channels that can be used to cancel pending block download and
@@ -237,7 +243,8 @@ where
     ZV::Future: Send,
     ZSTip: ChainTip + Clone + Send + 'static,
 {
-    type Item = Result<(Height, block::Hash), BlockDownloadVerifyError>;
+    type Item =
+        Result<(Height, block::Hash, Option<PeerSocketAddr>, usize), BlockDownloadVerifyError>;
 
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context) -> Poll<Option<Self::Item>> {
         let this = self.project();
@@ -252,10 +259,10 @@ where
         // TODO: this would be cleaner with poll_map (#2693)
         if let Some(join_result) = ready!(this.pending.poll_next(cx)) {
             match join_result.expect("block download and verify tasks must not panic") {
-                Ok((height, hash)) => {
+                Ok((height, hash, advertiser_addr, size_bytes)) => {
                     this.cancel_handles.remove(&hash);
 
-                    Poll::Ready(Some(Ok((height, hash))))
+                    Poll::Ready(Some(Ok((height, hash, advertiser_addr, size_bytes))))
                 }
                 Err((e, hash)) => {
                     this.cancel_handles.remove(&hash);
@@ -527,6 +534,7 @@ where
 
                 // Verify the block.
                 let verify_start = std::time::Instant::now();
+                let size_bytes = block.zcash_serialized_size();
                 let mut rsp = verifier
                     .map_err(|error| BlockDownloadVerifyError::VerifierServiceError { error })?
                     .call(zebra_consensus::Request::Commit(block)).boxed();
@@ -560,7 +568,7 @@ where
                 }
 
                 verification
-                    .map(|hash| (block_height, hash))
+                    .map(|hash| (block_height, hash, advertiser_addr, size_bytes))
                     .map_err(|err| {
                         match err.downcast::<zebra_consensus::router::RouterError>() {
                             Ok(error) => BlockDownloadVerifyError::Invalid { error: *error, height: block_height, hash, advertiser_addr },

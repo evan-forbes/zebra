@@ -1753,6 +1753,7 @@ async fn setup_with_mempool_config(
         latest_chain_tip,
         chain_tip_change.clone(),
         misbehavior_tx,
+        zebra_trace::Tracer::noop(),
     );
 
     let mut mempool_transaction_receiver = mempool_transaction_subscriber.subscribe();

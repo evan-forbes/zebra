@@ -666,6 +666,7 @@ async fn setup(
         inbound_service.clone(),
         latest_chain_tip.clone(),
         "Zebra user agent".to_string(),
+        zebra_trace::Tracer::noop(),
     )
     .await;
 
@@ -708,6 +709,7 @@ async fn setup(
         latest_chain_tip.clone(),
         chain_tip_change.clone(),
         misbehavior_tx,
+        zebra_trace::Tracer::noop(),
     );
 
     // Enable the mempool
@@ -741,11 +743,13 @@ async fn setup(
         chain_tip_change,
         peer_set.clone(),
         Some(submitblock_channel.receiver()),
+        zebra_trace::Tracer::noop(),
     ));
 
     let tx_gossip_task_handle = tokio::spawn(gossip_mempool_transaction_id(
         transaction_subscriber.subscribe(),
         peer_set.clone(),
+        zebra_trace::Tracer::noop(),
     ));
 
     // Set up the inbound service response for the isolated peer
@@ -870,6 +874,7 @@ mod submitblock_test {
             inbound_service.clone(),
             latest_chain_tip.clone(),
             "Zebra user agent".to_string(),
+            zebra_trace::Tracer::noop(),
         )
         .await;
 
@@ -887,6 +892,7 @@ mod submitblock_test {
                 chain_tip_change,
                 peer_set.clone(),
                 Some(submitblock_channel.receiver()),
+                zebra_trace::Tracer::noop(),
             )
             .in_current_span(),
         );

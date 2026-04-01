@@ -86,6 +86,7 @@ fn new_test_connection<A>() -> (
         ActiveConnectionCounter::new_counter().track_connection(),
         Arc::new(connection_info),
         Vec::new(),
+        zebra_trace::Tracer::noop(),
     );
 
     (
