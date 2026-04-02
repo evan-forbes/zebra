@@ -327,6 +327,8 @@ where
             connected_addr: crate::peer::ConnectedAddr::Isolated,
             remote,
             negotiated_version,
+            #[cfg(feature = "p2p-tracing")]
+            connection_id: 1,
         });
 
         let client = Client {

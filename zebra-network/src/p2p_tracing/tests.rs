@@ -133,6 +133,40 @@ fn noop_tracer_skips_message_id_work() {
     assert_eq!(seq.load(std::sync::atomic::Ordering::Relaxed), 0);
 }
 
+#[tokio::test]
+async fn trace_msg_emits_expected_event() {
+    let (tx, mut rx) = mpsc::channel(1);
+    let tracer = P2pTracer::new(tx);
+    let seq = AtomicU64::new(0);
+
+    tracer.trace_msg(
+        "send",
+        &Message::Ping(Nonce(99)),
+        &Arc::from("127.0.0.1:8233"),
+        7,
+        &seq,
+    );
+
+    let event = rx.recv().await.expect("trace event should be emitted");
+    let TraceEvent::PeerMessage(event) = event else {
+        panic!("expected peer message event");
+    };
+
+    assert_eq!(event.dir, "send");
+    assert_eq!(event.msg, "ping");
+    assert_eq!(&*event.peer, "127.0.0.1:8233");
+    assert_eq!(event.conn, 7);
+    assert_eq!(event.summary.expect("summary").nonce, Some(99));
+
+    match event.mid {
+        TraceMessageId::Nonce { prefix, nonce } => {
+            assert_eq!(prefix, "ping");
+            assert_eq!(nonce, 99);
+        }
+        _ => panic!("expected nonce message id"),
+    }
+}
+
 #[test]
 fn message_id_is_deterministic() {
     let seq = AtomicU64::new(0);

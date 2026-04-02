@@ -41,5 +41,7 @@ fn connection_info_types_are_public() {
         connected_addr,
         remote,
         negotiated_version,
+        #[cfg(feature = "p2p-tracing")]
+        connection_id: 1,
     });
 }

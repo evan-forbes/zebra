@@ -76,6 +76,8 @@ fn new_test_connection<A>() -> (
         connected_addr: ConnectedAddr::Isolated,
         remote,
         negotiated_version: fake_version,
+        #[cfg(feature = "p2p-tracing")]
+        connection_id: 1,
     };
 
     let connection = Connection::new(
@@ -86,6 +88,8 @@ fn new_test_connection<A>() -> (
         ActiveConnectionCounter::new_counter().track_connection(),
         Arc::new(connection_info),
         Vec::new(),
+        #[cfg(feature = "p2p-tracing")]
+        crate::p2p_tracing::P2pTracer::noop(),
     );
 
     (
