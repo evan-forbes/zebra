@@ -3,6 +3,8 @@
 use std::{sync::atomic::AtomicU64, sync::Arc};
 
 use super::*;
+use tokio::sync::mpsc;
+use zebra_jsonl_trace::JsonlTracer;
 
 #[test]
 fn trace_record_serializes_to_json() {
@@ -88,7 +90,7 @@ fn noop_tracer_does_not_panic() {
 #[test]
 fn full_channel_drops_without_blocking() {
     let (tx, _rx) = mpsc::channel(1);
-    let tracer = P2pTracer::new(tx);
+    let tracer = P2pTracer::new(JsonlTracer::new(tx));
 
     tracer.trace(TraceEvent::PeerMessage(PeerMessageEvent {
         ts_unix_ms: 0,
@@ -131,6 +133,35 @@ fn noop_tracer_skips_message_id_work() {
     );
 
     assert_eq!(seq.load(std::sync::atomic::Ordering::Relaxed), 0);
+}
+
+#[tokio::test]
+async fn trace_msg_emits_expected_event() {
+    let (tx, mut rx) = mpsc::channel(1);
+    let tracer = P2pTracer::new(JsonlTracer::new(tx));
+    let seq = AtomicU64::new(0);
+
+    tracer.trace_msg(
+        "send",
+        &Message::Ping(Nonce(99)),
+        &Arc::from("127.0.0.1:8233"),
+        7,
+        &seq,
+    );
+
+    let event = rx.recv().await.expect("trace event should be emitted");
+    assert_eq!(event.table, "peer_message");
+    assert_eq!(event.file_name, "peer_message.jsonl");
+
+    let record: serde_json::Value =
+        serde_json::from_slice(&event.line).expect("serialized P2P trace record");
+
+    assert_eq!(record["dir"], "send");
+    assert_eq!(record["msg"], "ping");
+    assert_eq!(record["peer"], "127.0.0.1:8233");
+    assert_eq!(record["conn"], 7);
+    assert_eq!(record["mid"], "ping:99");
+    assert_eq!(record["summary"]["nonce"], 99);
 }
 
 #[test]
@@ -177,15 +208,10 @@ fn connection_id_is_monotonic() {
 async fn writer_task_produces_per_table_jsonl() {
     let dir = tempfile::tempdir().expect("tempdir");
     let trace_dir = dir.path().join("traces");
-
-    let (tx, rx) = mpsc::channel(16);
-    let writer = TraceWriter::new(trace_dir.clone())
-        .await
-        .expect("trace writer");
-    let handle = tokio::spawn(run_trace_writer(rx, writer));
+    let tracer = P2pTracer::new(JsonlTracer::spawn(trace_dir.clone()));
 
     for i in 0..3 {
-        tx.send(TraceEvent::PeerMessage(PeerMessageEvent {
+        tracer.trace(TraceEvent::PeerMessage(PeerMessageEvent {
             ts_unix_ms: 1_743_249_600_000 + i as i64,
             dir: "send",
             msg: "ping",
@@ -201,22 +227,18 @@ async fn writer_task_produces_per_table_jsonl() {
                 hashes: Vec::new(),
                 height: None,
             }),
-        }))
-        .await
-        .expect("send should succeed");
+        }));
     }
 
-    tx.send(TraceEvent::TraceDropped(TraceDroppedEvent {
+    tracer.trace(TraceEvent::TraceDropped(TraceDroppedEvent {
         ts_unix_ms: 1_743_249_700_000,
         table: TraceTable::PeerMessage,
         queue_full_dropped: 2,
         sampled_dropped: 5,
-    }))
-    .await
-    .expect("send should succeed");
+    }));
 
-    drop(tx);
-    handle.await.expect("writer task should complete");
+    drop(tracer);
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
     let peer_message_path = trace_dir.join("peer_message.jsonl");
     let peer_message_contents = tokio::fs::read_to_string(&peer_message_path)
