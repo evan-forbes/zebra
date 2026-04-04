@@ -10,41 +10,19 @@ use std::{
         atomic::{AtomicU64, Ordering},
         Arc,
     },
-    time::Duration,
 };
 
 use chrono::{SecondsFormat, Utc};
 use serde::Serialize;
-use tokio::{
-    io::{AsyncWriteExt, BufWriter},
-    sync::mpsc::{
-        self,
-        error::{TryRecvError, TrySendError},
-    },
-    time::{self, Instant},
-};
 use zebra_chain::{block, transaction};
+use zebra_jsonl_trace::{
+    JsonlTraceConfig, JsonlTraceReserveError, JsonlTraceSendError, JsonlTracer, JsonlWriteEvent,
+};
 
 use crate::protocol::external::{InventoryHash, Message, Nonce};
 
 #[cfg(test)]
 mod tests;
-
-/// Channel capacity. The writer batches aggressively and adapts under queue
-/// pressure, so we keep the queue smaller to bound memory usage.
-const TRACE_CHANNEL_CAPACITY: usize = 16_384;
-
-/// Max number of events to drain into a single write batch.
-const TRACE_MAX_BATCH_EVENTS: usize = 256;
-
-/// How long the writer waits for more events after receiving the first event in a batch.
-const TRACE_BATCH_LINGER: Duration = Duration::from_millis(5);
-
-/// Flush table buffers to the underlying file once they reach this size.
-const TRACE_BUFFER_FLUSH_BYTES: usize = 256 * 1024;
-
-/// Force a buffered file flush at least this often.
-const TRACE_FILE_FLUSH_INTERVAL: Duration = Duration::from_secs(1);
 
 /// Max number of hashes to include in a payload summary.
 const MAX_SUMMARY_HASHES: usize = 5;
@@ -74,8 +52,6 @@ enum TraceTable {
 }
 
 impl TraceTable {
-    const ALL: [Self; 2] = [Self::PeerMessage, Self::TraceDropped];
-
     fn file_name(self) -> &'static str {
         match self {
             Self::PeerMessage => "peer_message.jsonl",
@@ -94,15 +70,6 @@ impl TraceTable {
 enum TraceEvent {
     PeerMessage(PeerMessageEvent),
     TraceDropped(TraceDroppedEvent),
-}
-
-impl TraceEvent {
-    fn table(&self) -> TraceTable {
-        match self {
-            Self::PeerMessage(_) => TraceTable::PeerMessage,
-            Self::TraceDropped(_) => TraceTable::TraceDropped,
-        }
-    }
 }
 
 struct PeerMessageEvent {
@@ -129,16 +96,16 @@ enum TraceDropReason {
 
 #[derive(Clone)]
 struct TraceRuntime {
-    tx: mpsc::Sender<TraceEvent>,
+    tracer: JsonlTracer,
     queue_full_drops: Arc<AtomicU64>,
     sampled_drops: Arc<AtomicU64>,
     sample_counter: Arc<AtomicU64>,
 }
 
 impl TraceRuntime {
-    fn new(tx: mpsc::Sender<TraceEvent>) -> Self {
+    fn new(tracer: JsonlTracer) -> Self {
         Self {
-            tx,
+            tracer,
             queue_full_drops: Arc::new(AtomicU64::new(0)),
             sampled_drops: Arc::new(AtomicU64::new(0)),
             sample_counter: Arc::new(AtomicU64::new(0)),
@@ -157,13 +124,14 @@ impl TraceRuntime {
     }
 
     fn adaptive_sample_rate(&self) -> u64 {
-        let remaining = self.tx.capacity();
+        let remaining = self.tracer.capacity();
+        let channel_capacity = trace_config().channel_capacity;
 
-        if remaining <= TRACE_CHANNEL_CAPACITY / 32 {
+        if remaining <= channel_capacity / 32 {
             TRACE_SAMPLE_RATE_HIGH_PRESSURE
-        } else if remaining <= TRACE_CHANNEL_CAPACITY / 16 {
+        } else if remaining <= channel_capacity / 16 {
             TRACE_SAMPLE_RATE_MEDIUM_PRESSURE
-        } else if remaining <= TRACE_CHANNEL_CAPACITY / 8 {
+        } else if remaining <= channel_capacity / 8 {
             TRACE_SAMPLE_RATE_LOW_PRESSURE
         } else {
             1
@@ -194,15 +162,20 @@ impl TraceRuntime {
             sampled_dropped,
         });
 
-        match self.tx.try_send(event) {
-            Ok(()) | Err(TrySendError::Closed(_)) => {}
-            Err(TrySendError::Full(TraceEvent::TraceDropped(event))) => {
+        let Some(event) = serialize_event(event) else {
+            return;
+        };
+
+        match self.tracer.try_send(event) {
+            Ok(())
+            | Err(JsonlTraceSendError::Closed(_))
+            | Err(JsonlTraceSendError::Disabled(_)) => {}
+            Err(JsonlTraceSendError::Full(_)) => {
                 self.queue_full_drops
-                    .fetch_add(event.queue_full_dropped, Ordering::Relaxed);
+                    .fetch_add(queue_full_dropped, Ordering::Relaxed);
                 self.sampled_drops
-                    .fetch_add(event.sampled_dropped, Ordering::Relaxed);
+                    .fetch_add(sampled_dropped, Ordering::Relaxed);
             }
-            Err(TrySendError::Full(_)) => unreachable!("trace drop events only requeue themselves"),
         }
     }
 }
@@ -210,38 +183,33 @@ impl TraceRuntime {
 /// A handle for emitting trace events. Clone is cheap for active tracers.
 #[derive(Clone)]
 pub(crate) struct P2pTracer {
-    inner: TraceState,
-}
-
-#[derive(Clone)]
-enum TraceState {
-    Disabled,
-    Enabled(TraceRuntime),
+    runtime: Option<TraceRuntime>,
 }
 
 impl P2pTracer {
-    /// Create a new tracer backed by the given channel sender.
-    fn new(tx: mpsc::Sender<TraceEvent>) -> Self {
+    fn new(tracer: JsonlTracer) -> Self {
         Self {
-            inner: TraceState::Enabled(TraceRuntime::new(tx)),
+            runtime: tracer.is_enabled().then(|| TraceRuntime::new(tracer)),
         }
     }
 
     /// Create a no-op tracer. All trace calls return immediately.
     pub(crate) fn noop() -> Self {
-        Self {
-            inner: TraceState::Disabled,
-        }
+        Self { runtime: None }
     }
 
     /// Emit a trace record. Never blocks. Drops the record if the channel is full.
     #[cfg(test)]
     fn trace(&self, event: TraceEvent) {
-        let TraceState::Enabled(runtime) = &self.inner else {
+        let Some(runtime) = &self.runtime else {
             return;
         };
 
-        let _ = runtime.tx.try_send(event);
+        let Some(event) = serialize_event(event) else {
+            return;
+        };
+
+        let _ = runtime.tracer.try_send(event);
     }
 
     /// Convenience: build and emit a trace record from a message.
@@ -253,7 +221,7 @@ impl P2pTracer {
         connection_id: u64,
         seq: &AtomicU64,
     ) {
-        let TraceState::Enabled(runtime) = &self.inner else {
+        let Some(runtime) = &self.runtime else {
             return;
         };
 
@@ -262,19 +230,20 @@ impl P2pTracer {
             return;
         }
 
-        let permit = match runtime.tx.try_reserve() {
+        let permit = match runtime.tracer.try_reserve() {
             Ok(permit) => permit,
-            Err(_) => {
+            Err(JsonlTraceReserveError::Full) => {
                 runtime.record_drop(TraceDropReason::QueueFull);
                 return;
             }
+            Err(JsonlTraceReserveError::Disabled | JsonlTraceReserveError::Closed) => return,
         };
 
         let ts_unix_ms = Utc::now().timestamp_millis();
         let (msg_type, summary) = summarize_message(msg);
         let mid = message_id(msg, connection_id, seq);
 
-        permit.send(TraceEvent::PeerMessage(PeerMessageEvent {
+        let Some(event) = serialize_event(TraceEvent::PeerMessage(PeerMessageEvent {
             ts_unix_ms,
             dir: direction,
             msg: msg_type,
@@ -282,7 +251,11 @@ impl P2pTracer {
             conn: connection_id,
             mid,
             summary,
-        }));
+        })) else {
+            return;
+        };
+
+        permit.send(event);
 
         runtime.try_emit_drop_record(ts_unix_ms);
     }
@@ -681,232 +654,47 @@ fn render_trace_dropped_record(event: TraceDroppedEvent) -> TraceDroppedRecord {
     }
 }
 
-struct TableWriter {
-    file: BufWriter<tokio::fs::File>,
-    encode_buf: Vec<u8>,
-}
-
-impl TableWriter {
-    fn new(file: tokio::fs::File) -> Self {
-        Self {
-            file: BufWriter::new(file),
-            encode_buf: Vec::with_capacity(TRACE_BUFFER_FLUSH_BYTES),
+fn serialize_event(event: TraceEvent) -> Option<JsonlWriteEvent> {
+    let (table, line) = match event {
+        TraceEvent::PeerMessage(event) => {
+            let table = TraceTable::PeerMessage;
+            let record = render_peer_message_record(event);
+            let line = serde_json::to_vec(&record);
+            (table, line)
         }
-    }
-
-    fn append_json<T: Serialize>(&mut self, record: &T) -> Result<(), serde_json::Error> {
-        serde_json::to_writer(&mut self.encode_buf, record)?;
-        self.encode_buf.push(b'\n');
-        Ok(())
-    }
-
-    async fn flush_buffer(&mut self, flush_file: bool) -> std::io::Result<()> {
-        if !self.encode_buf.is_empty() {
-            self.file.write_all(&self.encode_buf).await?;
-            self.encode_buf.clear();
+        TraceEvent::TraceDropped(event) => {
+            let table = TraceTable::TraceDropped;
+            let record = render_trace_dropped_record(event);
+            let line = serde_json::to_vec(&record);
+            (table, line)
         }
+    };
 
-        if flush_file {
-            self.file.flush().await?;
-        }
-
-        Ok(())
-    }
-}
-
-struct TraceWriter {
-    trace_dir: PathBuf,
-    peer_message: Option<TableWriter>,
-    trace_dropped: Option<TableWriter>,
-    last_file_flush: Instant,
-}
-
-impl TraceWriter {
-    async fn new(trace_dir: PathBuf) -> std::io::Result<Self> {
-        tokio::fs::create_dir_all(&trace_dir).await?;
-
-        Ok(Self {
-            peer_message: Some(TableWriter::new(
-                tokio::fs::OpenOptions::new()
-                    .create(true)
-                    .append(true)
-                    .open(trace_dir.join(TraceTable::PeerMessage.file_name()))
-                    .await?,
-            )),
-            trace_dropped: Some(TableWriter::new(
-                tokio::fs::OpenOptions::new()
-                    .create(true)
-                    .append(true)
-                    .open(trace_dir.join(TraceTable::TraceDropped.file_name()))
-                    .await?,
-            )),
-            trace_dir,
-            last_file_flush: Instant::now(),
-        })
-    }
-
-    fn has_open_files(&self) -> bool {
-        self.peer_message.is_some() || self.trace_dropped.is_some()
-    }
-
-    async fn write_batch(&mut self, batch: Vec<TraceEvent>, force_flush: bool) {
-        let mut failed_tables = Vec::new();
-
-        for event in batch {
-            let table = event.table();
-            let Some(table_writer) = self.table_writer_mut(table) else {
-                continue;
-            };
-
-            let append_result = match event {
-                TraceEvent::PeerMessage(event) => {
-                    let record = render_peer_message_record(event);
-                    table_writer.append_json(&record)
-                }
-                TraceEvent::TraceDropped(event) => {
-                    let record = render_trace_dropped_record(event);
-                    table_writer.append_json(&record)
-                }
-            };
-
-            if let Err(error) = append_result {
-                warn!(
-                    ?error,
-                    table = table.name(),
-                    "failed to serialize trace event"
-                );
-            }
-        }
-
-        let flush_file = force_flush || self.last_file_flush.elapsed() >= TRACE_FILE_FLUSH_INTERVAL;
-        for table in TraceTable::ALL {
-            let should_flush_buffer = self.table_writer(table).is_some_and(|table_writer| {
-                table_writer.encode_buf.len() >= TRACE_BUFFER_FLUSH_BYTES
-            });
-
-            if !should_flush_buffer && !flush_file && !force_flush {
-                continue;
-            }
-
-            let Some(table_writer) = self.table_writer_mut(table) else {
-                continue;
-            };
-
-            if let Err(error) = table_writer.flush_buffer(flush_file || force_flush).await {
-                warn!(
-                    ?error,
-                    table = table.name(),
-                    trace_dir = ?self.trace_dir,
-                    "disabling trace table after write failure"
-                );
-                failed_tables.push(table);
-            }
-        }
-
-        if flush_file || force_flush {
-            self.last_file_flush = Instant::now();
-        }
-
-        for table in failed_tables {
-            self.disable_table(table);
-        }
-    }
-
-    async fn flush_all(&mut self) {
-        self.write_batch(Vec::new(), true).await;
-    }
-
-    fn disable_table(&mut self, table: TraceTable) {
-        match table {
-            TraceTable::PeerMessage => {
-                self.peer_message = None;
-            }
-            TraceTable::TraceDropped => {
-                self.trace_dropped = None;
-            }
-        }
-    }
-
-    fn table_writer(&self, table: TraceTable) -> Option<&TableWriter> {
-        match table {
-            TraceTable::PeerMessage => self.peer_message.as_ref(),
-            TraceTable::TraceDropped => self.trace_dropped.as_ref(),
-        }
-    }
-
-    fn table_writer_mut(&mut self, table: TraceTable) -> Option<&mut TableWriter> {
-        match table {
-            TraceTable::PeerMessage => self.peer_message.as_mut(),
-            TraceTable::TraceDropped => self.trace_dropped.as_mut(),
+    match line {
+        Ok(line) => Some(JsonlWriteEvent {
+            table: table.name(),
+            file_name: table.file_name(),
+            line,
+        }),
+        Err(error) => {
+            warn!(
+                ?error,
+                table = table.name(),
+                "failed to serialize trace event"
+            );
+            None
         }
     }
 }
 
-/// Dedicated task that drains the trace channel and writes JSONL records.
-/// Batches writes for performance. Runs until the channel is closed or all
-/// tables have been disabled.
-async fn run_trace_writer(mut rx: mpsc::Receiver<TraceEvent>, mut writer: TraceWriter) {
-    loop {
-        let mut batch = Vec::with_capacity(TRACE_MAX_BATCH_EVENTS);
-        let mut receiver_closed = false;
-
-        match rx.recv().await {
-            Some(event) => batch.push(event),
-            None => receiver_closed = true,
-        }
-
-        if receiver_closed {
-            writer.flush_all().await;
-            break;
-        }
-
-        let deadline = Instant::now() + TRACE_BATCH_LINGER;
-        let sleep = time::sleep_until(deadline);
-        tokio::pin!(sleep);
-
-        while batch.len() < TRACE_MAX_BATCH_EVENTS {
-            match rx.try_recv() {
-                Ok(event) => {
-                    batch.push(event);
-                    continue;
-                }
-                Err(TryRecvError::Disconnected) => {
-                    receiver_closed = true;
-                    break;
-                }
-                Err(TryRecvError::Empty) => {}
-            }
-
-            tokio::select! {
-                maybe_event = rx.recv() => {
-                    match maybe_event {
-                        Some(event) => batch.push(event),
-                        None => {
-                            receiver_closed = true;
-                            break;
-                        }
-                    }
-                }
-                _ = &mut sleep => break,
-            }
-        }
-
-        writer.write_batch(batch, receiver_closed).await;
-
-        if !writer.has_open_files() {
-            warn!(trace_dir = ?writer.trace_dir, "all trace tables have been disabled");
-            break;
-        }
-
-        if receiver_closed {
-            writer.flush_all().await;
-            break;
-        }
-    }
+fn trace_config() -> JsonlTraceConfig {
+    JsonlTraceConfig::default()
 }
 
 fn trace_dir_from_env() -> Option<PathBuf> {
-    let trace_dir = std::env::var_os(TRACE_DIR_ENV).map(PathBuf::from);
+    let trace_dir = std::env::var_os(TRACE_DIR_ENV)
+        .or_else(|| std::env::var_os("ZEBRA_TRACE_DIR"))
+        .map(PathBuf::from);
 
     match trace_dir {
         Some(path) if !path.as_os_str().is_empty() => Some(path),
@@ -929,24 +717,11 @@ fn legacy_trace_dir_from_env() -> Option<PathBuf> {
 ///
 /// For compatibility, `ZEBRA_P2P_TRACE_FILE` also enables tracing, but now
 /// writes per-table files to a sibling `traces/` directory.
-pub(crate) async fn init_tracing() -> P2pTracer {
+pub(crate) fn init_tracing() -> P2pTracer {
     match trace_dir_from_env() {
-        Some(trace_dir) => match TraceWriter::new(trace_dir.clone()).await {
-            Ok(writer) => {
-                let (tx, rx) = mpsc::channel(TRACE_CHANNEL_CAPACITY);
-                tokio::spawn(run_trace_writer(rx, writer));
-                info!(trace_dir = ?trace_dir, "P2P message tracing enabled");
-                P2pTracer::new(tx)
-            }
-            Err(error) => {
-                warn!(
-                    ?error,
-                    trace_dir = ?trace_dir,
-                    "failed to initialize P2P trace directory, disabling tracing"
-                );
-                P2pTracer::noop()
-            }
-        },
+        Some(trace_dir) => {
+            P2pTracer::new(JsonlTracer::spawn_with_config(trace_dir, trace_config()))
+        }
         None => P2pTracer::noop(),
     }
 }

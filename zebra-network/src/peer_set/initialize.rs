@@ -183,7 +183,7 @@ where
         use crate::protocol::external::types::PeerServices;
 
         #[cfg(feature = "p2p-tracing")]
-        let p2p_tracer = crate::p2p_tracing::init_tracing().await;
+        let p2p_tracer = crate::p2p_tracing::init_tracing();
 
         let hs = peer::Handshake::builder()
             .with_config(config.clone())

@@ -28,6 +28,7 @@ use crate::{
 
 mod backup;
 mod chain;
+mod fork_tracing;
 
 #[cfg(test)]
 pub(crate) use backup::MIN_DURATION_BETWEEN_BACKUP_UPDATES;
@@ -36,6 +37,7 @@ pub(crate) use backup::MIN_DURATION_BETWEEN_BACKUP_UPDATES;
 mod tests;
 
 pub(crate) use chain::{Chain, SpendingTransactionId};
+use fork_tracing::{ForkTraceCause, ForkTraceSnapshot, ForkTracer};
 
 /// The state of the chains in memory, including queued blocks.
 ///
@@ -83,6 +85,9 @@ pub struct NonFinalizedState {
     /// on each chain. ([`Arc`]s are read-only, and we don't want to clone them just for metrics.)
     #[cfg(feature = "progress-bar")]
     chain_fork_length_bars: Vec<howudoin::Tx>,
+
+    /// Structured JSONL tracing for accepted fork and orphan events.
+    fork_tracer: ForkTracer,
 }
 
 impl std::fmt::Debug for NonFinalizedState {
@@ -110,6 +115,7 @@ impl Clone for NonFinalizedState {
             chain_count_bar: None,
             #[cfg(feature = "progress-bar")]
             chain_fork_length_bars: Vec::new(),
+            fork_tracer: self.fork_tracer.clone(),
         }
     }
 }
@@ -126,6 +132,7 @@ impl NonFinalizedState {
             chain_count_bar: None,
             #[cfg(feature = "progress-bar")]
             chain_fork_length_bars: Vec::new(),
+            fork_tracer: ForkTracer::from_env(network),
         }
     }
 
@@ -254,6 +261,22 @@ impl NonFinalizedState {
         self.chain_set.iter().rev()
     }
 
+    fn fork_trace_snapshot(&self) -> ForkTraceSnapshot {
+        ForkTraceSnapshot::from_state(self)
+    }
+
+    fn trace_fork_state_change(&self, before: &ForkTraceSnapshot, cause: ForkTraceCause) {
+        self.fork_tracer.trace_state_change(self, before, cause);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn enable_fork_tracing(&mut self, trace_dir: PathBuf) {
+        self.fork_tracer = ForkTracer::new(
+            &self.network,
+            zebra_jsonl_trace::JsonlTracer::spawn(trace_dir),
+        );
+    }
+
     /// Insert `chain` into `self.chain_set`, apply `chain_filter` to the chains,
     /// then limit the number of tracked chains.
     fn insert_with<F>(&mut self, chain: Arc<Chain>, chain_filter: F)
@@ -280,6 +303,7 @@ impl NonFinalizedState {
     /// Finalize the lowest height block in the non-finalized portion of the best
     /// chain and update all side-chains to match.
     pub fn finalize(&mut self) -> FinalizableBlock {
+        let before = self.fork_trace_snapshot();
         // Chain::cmp uses the partial cumulative work, and the hash of the tip block.
         // Neither of these fields has interior mutability.
         // (And when the tip block is dropped for a chain, the chain is also dropped.)
@@ -334,6 +358,13 @@ impl NonFinalizedState {
 
         self.update_metrics_for_chains();
 
+        self.trace_fork_state_change(
+            &before,
+            ForkTraceCause::Finalize {
+                finalized_tip_hash: best_chain_root.hash,
+            },
+        );
+
         // Add the treestate to the finalized block.
         FinalizableBlock::new(best_chain_root, root_treestate)
     }
@@ -347,6 +378,7 @@ impl NonFinalizedState {
         prepared: SemanticallyVerifiedBlock,
         finalized_state: &ZebraDb,
     ) -> Result<(), ValidateContextError> {
+        let before = self.fork_trace_snapshot();
         let parent_hash = prepared.block.header.previous_block_hash;
         let (height, hash) = (prepared.height, prepared.hash);
 
@@ -365,6 +397,12 @@ impl NonFinalizedState {
         });
 
         self.update_metrics_for_committed_block(height, hash);
+        self.trace_fork_state_change(
+            &before,
+            ForkTraceCause::CommitBlock {
+                committed_tip_hash: hash,
+            },
+        );
 
         Ok(())
     }
@@ -373,6 +411,7 @@ impl NonFinalizedState {
     /// the new chain into the chain_set and discard the previous.
     #[allow(clippy::unwrap_in_result)]
     pub fn invalidate_block(&mut self, block_hash: Hash) -> Result<block::Hash, InvalidateError> {
+        let before = self.fork_trace_snapshot();
         let Some(chain) = self.find_chain(|chain| chain.contains_block_hash(block_hash)) else {
             return Err(InvalidateError::BlockNotFound(block_hash));
         };
@@ -410,6 +449,12 @@ impl NonFinalizedState {
 
         self.update_metrics_for_chains();
         self.update_metrics_bars();
+        self.trace_fork_state_change(
+            &before,
+            ForkTraceCause::InvalidateBlock {
+                invalidated_hash: block_hash,
+            },
+        );
 
         Ok(block_hash)
     }
@@ -423,6 +468,7 @@ impl NonFinalizedState {
         block_hash: block::Hash,
         finalized_state: &ZebraDb,
     ) -> Result<Vec<block::Hash>, ReconsiderError> {
+        let before = self.fork_trace_snapshot();
         // Get the invalidated blocks that were invalidated by the given block_hash
         let height = self
             .invalidated_blocks
@@ -499,6 +545,12 @@ impl NonFinalizedState {
         });
 
         self.update_metrics_for_committed_block(height, hash);
+        self.trace_fork_state_change(
+            &before,
+            ForkTraceCause::ReconsiderBlock {
+                reconsidered_hash: block_hash,
+            },
+        );
 
         Ok(invalidated_block_hashes)
     }
@@ -512,6 +564,7 @@ impl NonFinalizedState {
         prepared: SemanticallyVerifiedBlock,
         finalized_state: &ZebraDb,
     ) -> Result<(), ValidateContextError> {
+        let before = self.fork_trace_snapshot();
         let finalized_tip_height = finalized_state.finalized_tip_height();
 
         // TODO: fix tests that don't initialize the finalized state
@@ -538,6 +591,12 @@ impl NonFinalizedState {
         // If the block is valid, add the new chain fork to the set of recent chains.
         self.insert(chain);
         self.update_metrics_for_committed_block(height, hash);
+        self.trace_fork_state_change(
+            &before,
+            ForkTraceCause::CommitNewChain {
+                committed_tip_hash: hash,
+            },
+        );
 
         Ok(())
     }

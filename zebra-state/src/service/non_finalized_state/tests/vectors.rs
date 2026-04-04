@@ -59,6 +59,51 @@ fn construct_single() -> Result<()> {
     Ok(())
 }
 
+#[tokio::test]
+async fn fork_tracing_writes_fork_events_and_snapshots() -> Result<()> {
+    let _init_guard = zebra_test::init();
+    let network = Network::Mainnet;
+    let block1: Arc<Block> = Arc::new(network.test_block(653599, 583999).unwrap());
+    let block2 = block1.make_fake_child().set_work(10);
+    let side_child = block1.make_fake_child().set_work(1);
+
+    let mut state = NonFinalizedState::new(&network);
+    let trace_dir = tempfile::tempdir()?;
+    let trace_path = trace_dir.path().to_owned();
+    state.enable_fork_tracing(trace_path.clone());
+
+    let finalized_state = FinalizedState::new(
+        &Config::ephemeral(),
+        &network,
+        #[cfg(feature = "elasticsearch")]
+        false,
+    );
+
+    let fake_value_pool = ValueBalance::<NonNegative>::fake_populated_pool();
+    finalized_state.set_finalized_value_pool(fake_value_pool);
+
+    state.commit_new_chain(block1.clone().prepare(), &finalized_state)?;
+    state.commit_block(block2.prepare(), &finalized_state)?;
+    state.commit_block(side_child.prepare(), &finalized_state)?;
+    let _ = state.finalize();
+    let _ = state.finalize();
+
+    drop(state);
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    let event_contents = tokio::fs::read_to_string(trace_path.join("fork_event.jsonl")).await?;
+    let snapshot_contents =
+        tokio::fs::read_to_string(trace_path.join("fork_snapshot.jsonl")).await?;
+
+    assert!(event_contents.contains("\"event\":\"fork_created\""));
+    assert!(event_contents.contains("\"event\":\"fork_pruned\""));
+    assert!(event_contents.contains("\"reason\":\"finalized_root_mismatch\""));
+    assert!(snapshot_contents.contains("\"chain_count\":2"));
+    assert!(snapshot_contents.contains("\"chain_count\":0"));
+
+    Ok(())
+}
+
 #[test]
 fn construct_many() -> Result<()> {
     let _init_guard = zebra_test::init();
