@@ -228,6 +228,49 @@ fn peer_set_rejects_connections_past_per_ip_limit() {
     });
 }
 
+#[test]
+fn peer_set_broadcasts_to_all_small_peer_sets() {
+    let peer_version = Version::min_specified_for_upgrade(&Network::Mainnet, NetworkUpgrade::Nu6);
+
+    let (runtime, _init_guard) = zebra_test::init_async();
+    let _guard = runtime.enter();
+
+    runtime.block_on(async move {
+        for peer_count in [1usize, 2, 3, 4, 5] {
+            let peer_versions = PeerVersions {
+                peer_versions: vec![peer_version; peer_count],
+            };
+
+            let (discovered_peers, _handles) = peer_versions.mock_peer_discovery();
+            let (minimum_peer_version, _best_tip_height) =
+                MinimumPeerVersion::with_mock_chain_tip(&Network::Mainnet);
+
+            let (mut peer_set, _peer_set_guard) = PeerSetBuilder::new()
+                .with_discover(discovered_peers)
+                .with_minimum_peer_version(minimum_peer_version.clone())
+                .max_conns_per_ip(usize::MAX)
+                .build();
+
+            peer_set
+                .ready()
+                .await
+                .expect("peer set service is always ready");
+
+            let actual = peer_set.number_of_peers_to_broadcast();
+            let expected = if peer_count <= 16 {
+                peer_count
+            } else {
+                peer_count.div_ceil(3)
+            };
+
+            assert_eq!(
+                actual, expected,
+                "unexpected broadcast fanout for {peer_count} ready peers"
+            );
+        }
+    });
+}
+
 /// Check that a peer set with an empty inventory registry routes requests to a random ready peer.
 #[test]
 fn peer_set_route_inv_empty_registry() {

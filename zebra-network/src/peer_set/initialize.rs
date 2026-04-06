@@ -20,7 +20,7 @@ use futures::{
     Future, TryFutureExt,
 };
 use indexmap::IndexMap;
-use rand::seq::SliceRandom;
+use rand::{Rng, seq::SliceRandom};
 use tokio::{
     net::{TcpListener, TcpStream},
     sync::{broadcast, mpsc, watch},
@@ -344,6 +344,15 @@ where
     S::Future: Send + 'static,
 {
     let initial_peers = limit_initial_peers(&config, address_book_updater).await;
+
+    // Add random jitter before starting initial connections to prevent simultaneous
+    // connection races between nodes that start at the same time. Without this,
+    // both sides of a pair open outbound connections simultaneously, each side drops
+    // the other's inbound (per-IP limit), killing both TCP streams and leaving
+    // zero surviving connections with a long reconnection blackout.
+    let jitter = rand::thread_rng().gen_range(Duration::ZERO..Duration::from_secs(3));
+    info!(?jitter, "delaying initial peer connections to avoid simultaneous-open races");
+    sleep(jitter).await;
 
     let mut handshake_success_total: usize = 0;
     let mut handshake_error_total: usize = 0;

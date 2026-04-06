@@ -665,7 +665,10 @@ where
     ) -> Self {
         let metrics_label = connection_info.connected_addr.get_transient_addr_label();
         #[cfg(feature = "p2p-tracing")]
-        let p2p_peer_label: Arc<str> = Arc::from(metrics_label.clone());
+        let p2p_peer_label: Arc<str> = connection_info
+            .connected_addr
+            .get_transient_addr_label_for_tracing()
+            .into();
 
         Connection {
             connection_info,

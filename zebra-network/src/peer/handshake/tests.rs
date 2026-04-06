@@ -15,3 +15,32 @@ where
         self.nonces.lock().await.len()
     }
 }
+
+#[test]
+fn connected_addr_trace_label_reveals_socket_addr() {
+    let connected_addr = ConnectedAddr::new_outbound_direct(
+        "192.168.180.9:10000"
+            .parse::<PeerSocketAddr>()
+            .expect("valid peer socket address"),
+    );
+
+    assert_eq!(
+        connected_addr.get_transient_addr_label(),
+        "v4redacted:10000"
+    );
+    assert_eq!(
+        connected_addr.get_transient_addr_label_for_tracing(),
+        "192.168.180.9:10000"
+    );
+}
+
+#[test]
+fn isolated_connected_addr_trace_label_stays_isolated() {
+    let connected_addr = ConnectedAddr::new_isolated();
+
+    assert_eq!(connected_addr.get_transient_addr_label(), "isolated");
+    assert_eq!(
+        connected_addr.get_transient_addr_label_for_tracing(),
+        "isolated"
+    );
+}

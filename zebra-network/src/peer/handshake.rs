@@ -315,6 +315,17 @@ impl ConnectedAddr {
             .map_or_else(|| "isolated".to_string(), |addr| addr.to_string())
     }
 
+    /// Returns the trace label for this connection's address.
+    ///
+    /// This reveals the underlying socket address and must only be used for
+    /// private, operator-controlled tracing outputs.
+    pub fn get_transient_addr_label_for_tracing(&self) -> String {
+        self.get_transient_addr().map_or_else(
+            || "isolated".to_string(),
+            |addr| addr.remove_socket_addr_privacy().to_string(),
+        )
+    }
+
     /// Returns a short label for the kind of connection.
     pub fn get_short_kind_label(&self) -> &'static str {
         match self {
@@ -721,7 +732,7 @@ where
     #[cfg(feature = "p2p-tracing")]
     let hs_seq = std::sync::atomic::AtomicU64::new(0);
     #[cfg(feature = "p2p-tracing")]
-    let hs_peer_label: Arc<str> = connected_addr.get_transient_addr_label().into();
+    let hs_peer_label: Arc<str> = connected_addr.get_transient_addr_label_for_tracing().into();
 
     debug!(?our_version, "sending initial version message");
     send_handshake_message(
@@ -1136,7 +1147,12 @@ where
             // These channels communicate between the inbound and outbound halves of the connection,
             // and between the different connection tasks. We create separate tasks and channels
             // for each new connection.
-            let (server_tx, server_rx) = futures::channel::mpsc::channel(0);
+            // Allow a small amount of per-peer request queueing so brief connection
+            // stalls don't immediately turn into dropped relay opportunities.
+            const CLIENT_REQUEST_CHANNEL_SIZE: usize = 10;
+
+            let (server_tx, server_rx) =
+                futures::channel::mpsc::channel(CLIENT_REQUEST_CHANNEL_SIZE);
             let (shutdown_tx, shutdown_rx) = oneshot::channel();
             let error_slot = ErrorSlot::default();
 

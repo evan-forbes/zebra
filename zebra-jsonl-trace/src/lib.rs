@@ -7,10 +7,10 @@ use std::{
 };
 
 use tokio::{
-    io::{AsyncWriteExt, BufWriter},
+    io::AsyncWriteExt,
     runtime::Handle,
     sync::mpsc::{self, error::TryRecvError, error::TrySendError},
-    time::{self, Instant},
+    time::{self, Instant, MissedTickBehavior},
 };
 
 /// Default trace channel capacity.
@@ -26,8 +26,8 @@ pub const DEFAULT_BATCH_LINGER: Duration = Duration::from_millis(5);
 /// Default number of buffered bytes before the writer flushes to the file.
 pub const DEFAULT_BUFFER_FLUSH_BYTES: usize = 256 * 1024;
 
-/// Default interval between forced file flushes.
-pub const DEFAULT_FILE_FLUSH_INTERVAL: Duration = Duration::from_secs(1);
+/// Default interval between forced file flushes and syncs.
+pub const DEFAULT_FILE_FLUSH_INTERVAL: Duration = Duration::from_secs(17);
 
 /// A pre-serialized JSONL record to be written to a per-table file.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -51,7 +51,7 @@ pub struct JsonlTraceConfig {
     pub batch_linger: Duration,
     /// Buffered bytes threshold before flushing to the underlying file.
     pub buffer_flush_bytes: usize,
-    /// Maximum time between forced file flushes.
+    /// Maximum time between forced file flushes and syncs.
     pub file_flush_interval: Duration,
 }
 
@@ -214,14 +214,14 @@ impl std::fmt::Debug for JsonlTracer {
 }
 
 struct TableWriter {
-    file: BufWriter<tokio::fs::File>,
+    file: tokio::fs::File,
     encode_buf: Vec<u8>,
 }
 
 impl TableWriter {
     fn new(file: tokio::fs::File, buffer_flush_bytes: usize) -> Self {
         Self {
-            file: BufWriter::new(file),
+            file,
             encode_buf: Vec::with_capacity(buffer_flush_bytes),
         }
     }
@@ -231,14 +231,15 @@ impl TableWriter {
         self.encode_buf.push(b'\n');
     }
 
-    async fn flush_buffer(&mut self, flush_file: bool) -> std::io::Result<()> {
+    async fn flush_buffer(&mut self, sync_file: bool) -> std::io::Result<()> {
         if !self.encode_buf.is_empty() {
             self.file.write_all(&self.encode_buf).await?;
             self.encode_buf.clear();
+            self.file.flush().await?;
         }
 
-        if flush_file {
-            self.file.flush().await?;
+        if sync_file {
+            self.file.sync_data().await?;
         }
 
         Ok(())
@@ -383,13 +384,31 @@ impl TraceWriter {
 }
 
 async fn run_trace_writer(mut rx: mpsc::Receiver<JsonlWriteEvent>, mut writer: TraceWriter) {
+    let mut flush_tick = time::interval(writer.config.file_flush_interval);
+    flush_tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
+
     loop {
         let mut batch = Vec::with_capacity(writer.config.max_batch_events);
         let mut receiver_closed = false;
+        let mut force_flush = false;
 
-        match rx.recv().await {
-            Some(event) => batch.push(event),
-            None => receiver_closed = true,
+        tokio::select! {
+            maybe_event = rx.recv() => {
+                match maybe_event {
+                    Some(event) => batch.push(event),
+                    None => receiver_closed = true,
+                }
+            }
+            _ = flush_tick.tick(), if writer.has_open_files() => {
+                writer.flush_all().await;
+
+                if !writer.has_open_files() {
+                    tracing::warn!(trace_dir = ?writer.trace_dir, "all trace tables have been disabled");
+                    break;
+                }
+
+                continue;
+            }
         }
 
         if receiver_closed {
@@ -424,11 +443,17 @@ async fn run_trace_writer(mut rx: mpsc::Receiver<JsonlWriteEvent>, mut writer: T
                         }
                     }
                 }
+                _ = flush_tick.tick(), if writer.has_open_files() => {
+                    force_flush = true;
+                    break;
+                }
                 _ = &mut sleep => break,
             }
         }
 
-        writer.write_batch(batch, receiver_closed).await;
+        writer
+            .write_batch(batch, force_flush || receiver_closed)
+            .await;
 
         if !writer.has_open_files() {
             tracing::warn!(trace_dir = ?writer.trace_dir, "all trace tables have been disabled");
@@ -483,6 +508,42 @@ mod tests {
 
         assert_eq!(alpha.trim(), "{\"value\":1}");
         assert_eq!(beta.trim(), "{\"value\":2}");
+    }
+
+    #[tokio::test]
+    async fn writer_flushes_idle_buffers_on_timer() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let trace_dir = dir.path().join("traces");
+
+        let config = JsonlTraceConfig {
+            batch_linger: Duration::from_millis(1),
+            buffer_flush_bytes: 1024,
+            file_flush_interval: Duration::from_millis(25),
+            ..JsonlTraceConfig::default()
+        };
+
+        let (tx, rx) = mpsc::channel(16);
+        let writer = TraceWriter::new(trace_dir.clone(), config);
+        let handle = tokio::spawn(run_trace_writer(rx, writer));
+
+        tx.send(JsonlWriteEvent {
+            table: "alpha",
+            file_name: "alpha.jsonl",
+            line: br#"{"value":1}"#.to_vec(),
+        })
+        .await
+        .expect("send should succeed");
+
+        time::sleep(Duration::from_millis(80)).await;
+
+        let alpha = tokio::fs::read_to_string(trace_dir.join("alpha.jsonl"))
+            .await
+            .expect("alpha file should be flushed while the writer is idle");
+
+        assert_eq!(alpha.trim(), "{\"value\":1}");
+
+        drop(tx);
+        handle.await.expect("writer task should complete");
     }
 
     #[test]

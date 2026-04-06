@@ -42,6 +42,8 @@ pub struct LocalTestnetGenesisOptions {
     pub disable_pow: bool,
     /// Target block spacing in seconds (post-Blossom). If `None`, uses the default (75s).
     pub target_spacing_secs: Option<u32>,
+    /// Extra empty blocks to append after funding blocks so premine coinbase outputs can mature.
+    pub maturity_padding_blocks: u32,
 }
 
 impl Default for LocalTestnetGenesisOptions {
@@ -51,6 +53,7 @@ impl Default for LocalTestnetGenesisOptions {
             latest_network_upgrade: NetworkUpgrade::Nu6_1,
             disable_pow: true,
             target_spacing_secs: None,
+            maturity_padding_blocks: 0,
         }
     }
 }
@@ -71,7 +74,7 @@ pub struct FundedKey {
 pub struct GeneratedLocalTestnet {
     /// The configured [`Network`] matching the generated genesis block.
     pub network: Network,
-    /// Genesis block followed by premine blocks (one per funded key).
+    /// Genesis block followed by funding blocks and any maturity-padding blocks.
     pub blocks: Vec<Block>,
     /// One funded keypair per miner name that was requested.
     pub funded_keys: Vec<FundedKey>,
@@ -93,7 +96,9 @@ impl GeneratedLocalTestnet {
 ///
 /// Creates a genesis block (height 0) with an empty coinbase, followed by one
 /// premine block per miner name, each paying 10 ZEC to a freshly generated
-/// P2PKH address. Network upgrades activate at `miner_count + 1`.
+/// P2PKH address, plus optional extra empty blocks. Network upgrades activate
+/// after all generated seed blocks so they can use the simpler pre-Overwinter
+/// commitment format.
 ///
 /// When `disable_pow` is false and the `internal-miner` feature is enabled,
 /// each block header is solved with Equihash before inclusion.
@@ -102,7 +107,9 @@ pub fn generate_local_testnet_with_funded_keys(
     options: LocalTestnetGenesisOptions,
 ) -> Result<GeneratedLocalTestnet, crate::BoxError> {
     let num_miners = miner_names.len();
-    let activation_height = (num_miners as u32) + 1;
+    let activation_height = (num_miners as u32)
+        .saturating_add(options.maturity_padding_blocks)
+        .saturating_add(1);
 
     // Generate funded keys.
     let secp = secp256k1::Secp256k1::new();
@@ -154,7 +161,7 @@ pub fn generate_local_testnet_with_funded_keys(
     )?;
     let genesis_hash = block::Hash::from(&*genesis.header);
 
-    let mut blocks = Vec::with_capacity(num_miners + 1);
+    let mut blocks = Vec::with_capacity(num_miners + options.maturity_padding_blocks as usize + 1);
     blocks.push(genesis);
     let mut prev_hash = genesis_hash;
 
@@ -167,6 +174,20 @@ pub fn generate_local_testnet_with_funded_keys(
             Some(&key.address),
             compact_difficulty,
             base_time + (i as i64 + 1),
+            options.disable_pow,
+        )?;
+        prev_hash = block::Hash::from(&*block.header);
+        blocks.push(block);
+    }
+
+    for i in 0..options.maturity_padding_blocks {
+        let height = Height((num_miners as u32).saturating_add(i).saturating_add(1));
+        let block = build_block(
+            height,
+            prev_hash,
+            None,
+            compact_difficulty,
+            base_time + height.0 as i64,
             options.disable_pow,
         )?;
         prev_hash = block::Hash::from(&*block.header);
@@ -434,5 +455,29 @@ mod tests {
                 Some(funded_key.address.clone())
             );
         }
+    }
+
+    #[test]
+    fn generated_chain_can_include_maturity_padding_blocks() {
+        let generated = generate_local_testnet_with_funded_keys(
+            vec!["alice".to_string(), "bob".to_string()],
+            LocalTestnetGenesisOptions {
+                maturity_padding_blocks: 200,
+                ..Default::default()
+            },
+        )
+        .expect("local testnet should generate");
+
+        assert_eq!(generated.blocks.len(), 203);
+        assert_eq!(generated.checkpoints.len(), 203);
+
+        for block in generated.blocks.iter().skip(3) {
+            assert!(block.transactions[0].outputs().is_empty());
+        }
+
+        assert_eq!(
+            NetworkUpgrade::Overwinter.activation_height(&generated.network),
+            Some(Height(203))
+        );
     }
 }

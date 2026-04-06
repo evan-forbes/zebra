@@ -1123,11 +1123,19 @@ where
             // peer set with a small number of peers.
             self.ready_services.len()
         } else {
+            // When the peer set is small, advertise to every ready peer so txs
+            // still propagate quickly across the whole connected graph.
+            const MIN_PEERS_TO_BROADCAST_ALL: usize = 16;
+
             // We are currently sending broadcast messages to a third of the total peers.
             const PEER_FRACTION_TO_BROADCAST: usize = 3;
 
-            // Round up, so that if we have one ready peer, it gets the request.
-            div_ceil(self.ready_services.len(), PEER_FRACTION_TO_BROADCAST)
+            if self.ready_services.len() <= MIN_PEERS_TO_BROADCAST_ALL {
+                self.ready_services.len()
+            } else {
+                // Round up, so that if we have one ready peer, it gets the request.
+                div_ceil(self.ready_services.len(), PEER_FRACTION_TO_BROADCAST)
+            }
         }
     }
 

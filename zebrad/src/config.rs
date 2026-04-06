@@ -142,10 +142,35 @@ impl ZebradConfig {
         // 3. Load from environment variables (with a sensitive-leaf deny-list)
         // Use the provided prefix and `__` as separator for nested keys.
         // We filter the raw environment first, then let config-rs parse types via try_parsing(true).
+        //
+        // Only env vars whose top-level key (the part before `__`) matches a known
+        // config section are forwarded. This prevents non-config env vars like
+        // `ZEBRA_P2P_TRACE_DIR` from being rejected by `deny_unknown_fields`.
+        const KNOWN_SECTIONS: &[&str] = &[
+            "CONSENSUS",
+            "METRICS",
+            "NETWORK",
+            "STATE",
+            "TRACING",
+            "SYNC",
+            "MEMPOOL",
+            "RPC",
+            "MINING",
+            "HEALTH",
+        ];
         let mut filtered_env: HashMap<String, String> = HashMap::new();
         let required_prefix = format!("{}_", env_prefix);
         for (key, value) in std::env::vars() {
             if let Some(without_prefix) = key.strip_prefix(&required_prefix) {
+                // Only include env vars whose top-level section is a known config field.
+                let top_level = without_prefix.split("__").next().unwrap_or(without_prefix);
+                if !KNOWN_SECTIONS
+                    .iter()
+                    .any(|s| s.eq_ignore_ascii_case(top_level))
+                {
+                    continue;
+                }
+
                 // Check for sensitive keys on the stripped key.
                 let parts: Vec<&str> = without_prefix.split("__").collect();
                 if let Some(leaf) = parts.last() {

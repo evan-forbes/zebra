@@ -141,11 +141,14 @@ proptest! {
             let number_of_peers_to_broadcast = peer_set.number_of_peers_to_broadcast();
 
             // The number of peers to broadcast should be at least 1,
-            // and if possible, it should be less than the number of ready peers.
+            // and once we are above the small-peer full-broadcast floor,
+            // it should be less than the number of ready peers.
             // (Since there are no requests, all active peers should be ready.)
             prop_assert!(number_of_peers_to_broadcast >= 1);
-            if total_number_of_active_peers > 1 {
+            if total_number_of_active_peers > 16 {
                 prop_assert!(number_of_peers_to_broadcast < total_number_of_active_peers);
+            } else {
+                prop_assert_eq!(number_of_peers_to_broadcast, total_number_of_active_peers);
             }
 
             // Send a request to all peers
