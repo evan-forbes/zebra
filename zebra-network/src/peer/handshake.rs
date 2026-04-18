@@ -80,6 +80,15 @@ where
     #[cfg(feature = "p2p-tracing")]
     p2p_tracer: crate::p2p_tracing::P2pTracer,
 
+    #[cfg(feature = "p2p-tracing")]
+    send_timing_tracer: crate::send_timing::SendTimingTracer,
+
+    #[cfg(feature = "p2p-tracing")]
+    session_tracer: crate::peer_session::SessionTracer,
+
+    #[cfg(feature = "p2p-tracing")]
+    heartbeat_tracer: crate::heartbeat::HeartbeatTracer,
+
     parent_span: Span,
 }
 
@@ -121,6 +130,12 @@ where
             nonces: self.nonces.clone(),
             #[cfg(feature = "p2p-tracing")]
             p2p_tracer: self.p2p_tracer.clone(),
+            #[cfg(feature = "p2p-tracing")]
+            send_timing_tracer: self.send_timing_tracer.clone(),
+            #[cfg(feature = "p2p-tracing")]
+            session_tracer: self.session_tracer.clone(),
+            #[cfg(feature = "p2p-tracing")]
+            heartbeat_tracer: self.heartbeat_tracer.clone(),
             parent_span: self.parent_span.clone(),
         }
     }
@@ -419,6 +434,15 @@ where
 
     #[cfg(feature = "p2p-tracing")]
     p2p_tracer: Option<crate::p2p_tracing::P2pTracer>,
+
+    #[cfg(feature = "p2p-tracing")]
+    send_timing_tracer: Option<crate::send_timing::SendTimingTracer>,
+
+    #[cfg(feature = "p2p-tracing")]
+    session_tracer: Option<crate::peer_session::SessionTracer>,
+
+    #[cfg(feature = "p2p-tracing")]
+    heartbeat_tracer: Option<crate::heartbeat::HeartbeatTracer>,
 }
 
 impl<S, C> Builder<S, C>
@@ -502,6 +526,12 @@ where
             inv_collector: self.inv_collector,
             #[cfg(feature = "p2p-tracing")]
             p2p_tracer: self.p2p_tracer,
+            #[cfg(feature = "p2p-tracing")]
+            send_timing_tracer: self.send_timing_tracer,
+            #[cfg(feature = "p2p-tracing")]
+            session_tracer: self.session_tracer,
+            #[cfg(feature = "p2p-tracing")]
+            heartbeat_tracer: self.heartbeat_tracer,
         }
     }
 
@@ -517,6 +547,27 @@ where
     #[cfg(feature = "p2p-tracing")]
     pub fn with_p2p_tracer(mut self, tracer: crate::p2p_tracing::P2pTracer) -> Self {
         self.p2p_tracer = Some(tracer);
+        self
+    }
+
+    /// Provide a send-path timing tracer. Optional.
+    #[cfg(feature = "p2p-tracing")]
+    pub fn with_send_timing_tracer(mut self, tracer: crate::send_timing::SendTimingTracer) -> Self {
+        self.send_timing_tracer = Some(tracer);
+        self
+    }
+
+    /// Provide a per-connection session summary tracer. Optional.
+    #[cfg(feature = "p2p-tracing")]
+    pub fn with_session_tracer(mut self, tracer: crate::peer_session::SessionTracer) -> Self {
+        self.session_tracer = Some(tracer);
+        self
+    }
+
+    /// Provide a node-level heartbeat tracer. Optional.
+    #[cfg(feature = "p2p-tracing")]
+    pub fn with_heartbeat_tracer(mut self, tracer: crate::heartbeat::HeartbeatTracer) -> Self {
+        self.heartbeat_tracer = Some(tracer);
         self
     }
 
@@ -559,6 +610,18 @@ where
             p2p_tracer: self
                 .p2p_tracer
                 .unwrap_or_else(crate::p2p_tracing::P2pTracer::noop),
+            #[cfg(feature = "p2p-tracing")]
+            send_timing_tracer: self
+                .send_timing_tracer
+                .unwrap_or_else(crate::send_timing::SendTimingTracer::noop),
+            #[cfg(feature = "p2p-tracing")]
+            session_tracer: self
+                .session_tracer
+                .unwrap_or_else(crate::peer_session::SessionTracer::noop),
+            #[cfg(feature = "p2p-tracing")]
+            heartbeat_tracer: self
+                .heartbeat_tracer
+                .unwrap_or_else(crate::heartbeat::HeartbeatTracer::noop),
             parent_span: Span::current(),
         })
     }
@@ -585,6 +648,12 @@ where
             latest_chain_tip: NoChainTip,
             #[cfg(feature = "p2p-tracing")]
             p2p_tracer: None,
+            #[cfg(feature = "p2p-tracing")]
+            send_timing_tracer: None,
+            #[cfg(feature = "p2p-tracing")]
+            session_tracer: None,
+            #[cfg(feature = "p2p-tracing")]
+            heartbeat_tracer: None,
         }
     }
 }
@@ -1033,6 +1102,12 @@ where
         let minimum_peer_version = self.minimum_peer_version.clone();
         #[cfg(feature = "p2p-tracing")]
         let p2p_tracer = self.p2p_tracer.clone();
+        #[cfg(feature = "p2p-tracing")]
+        let send_timing_tracer = self.send_timing_tracer.clone();
+        #[cfg(feature = "p2p-tracing")]
+        let session_tracer = self.session_tracer.clone();
+        #[cfg(feature = "p2p-tracing")]
+        let heartbeat_tracer = self.heartbeat_tracer.clone();
 
         // # Security
         //
@@ -1268,6 +1343,12 @@ where
                 alternate_addrs.collect(),
                 #[cfg(feature = "p2p-tracing")]
                 p2p_tracer.clone(),
+                #[cfg(feature = "p2p-tracing")]
+                send_timing_tracer.clone(),
+                #[cfg(feature = "p2p-tracing")]
+                session_tracer.clone(),
+                #[cfg(feature = "p2p-tracing")]
+                heartbeat_tracer.clone(),
             );
 
             let connection_task = tokio::spawn(

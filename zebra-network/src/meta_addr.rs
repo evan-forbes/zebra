@@ -312,6 +312,16 @@ pub enum MetaAddrChange {
         services: Option<PeerServices>,
     },
 
+    /// Marks an address as a proven self-connection so it can be suppressed
+    /// from future outbound attempts.
+    UpdateSelfConnection {
+        #[cfg_attr(
+            any(test, feature = "proptest-impl"),
+            proptest(strategy = "canonical_peer_addr_strategy()")
+        )]
+        addr: PeerSocketAddr,
+    },
+
     /// Updates an existing `MetaAddr` when a peer misbehaves such as by advertising
     /// semantically invalid blocks or transactions.
     #[cfg_attr(any(test, feature = "proptest-impl"), proptest(skip))]
@@ -455,6 +465,14 @@ impl MetaAddr {
         UpdateMisbehavior {
             addr: canonical_peer_addr(*addr),
             score_increment,
+        }
+    }
+
+    /// Returns a [`MetaAddrChange::UpdateSelfConnection`] for a peer address
+    /// that was proven to point back at this local node.
+    pub fn new_self_connection(addr: PeerSocketAddr) -> MetaAddrChange {
+        UpdateSelfConnection {
+            addr: canonical_peer_addr(*addr),
         }
     }
 
@@ -780,6 +798,7 @@ impl MetaAddrChange {
             | UpdatePingSent { addr, .. }
             | UpdateResponded { addr, .. }
             | UpdateFailed { addr, .. }
+            | UpdateSelfConnection { addr, .. }
             | UpdateMisbehavior { addr, .. } => *addr,
         }
     }
@@ -798,6 +817,7 @@ impl MetaAddrChange {
             | UpdatePingSent { addr, .. }
             | UpdateResponded { addr, .. }
             | UpdateFailed { addr, .. }
+            | UpdateSelfConnection { addr, .. }
             | UpdateMisbehavior { addr, .. } => *addr = new_addr,
         }
     }
@@ -817,6 +837,7 @@ impl MetaAddrChange {
             UpdatePingSent { .. } => None,
             UpdateResponded { .. } => None,
             UpdateFailed { services, .. } => *services,
+            UpdateSelfConnection { .. } => None,
             UpdateMisbehavior { .. } => None,
         }
     }
@@ -836,6 +857,7 @@ impl MetaAddrChange {
             | UpdatePingSent { .. }
             | UpdateResponded { .. }
             | UpdateFailed { .. }
+            | UpdateSelfConnection { .. }
             | UpdateMisbehavior { .. } => None,
         }
     }
@@ -871,6 +893,7 @@ impl MetaAddrChange {
             | UpdatePingSent { .. }
             | UpdateResponded { .. }
             | UpdateFailed { .. }
+            | UpdateSelfConnection { .. }
             | UpdateMisbehavior { .. } => None,
         }
     }
@@ -885,7 +908,7 @@ impl MetaAddrChange {
             // - the peer will appear to be live for longer, delaying future
             //   reconnection attempts.
             UpdateConnected { .. } | UpdateResponded { .. } => Some(now),
-            UpdateFailed { .. } | UpdateMisbehavior { .. } => None,
+            UpdateFailed { .. } | UpdateSelfConnection { .. } | UpdateMisbehavior { .. } => None,
             UpdatePingSent { .. } => None,
         }
     }
@@ -923,7 +946,8 @@ impl MetaAddrChange {
             | UpdateAttempt { .. }
             | UpdateConnected { .. }
             | UpdatePingSent { .. }
-            | UpdateResponded { .. } => None,
+            | UpdateResponded { .. }
+            | UpdateSelfConnection { .. } => None,
             // If there is a large delay applying this change, then:
             // - the peer might stay in the `AttemptPending` or `Responded`
             //   states for longer, and
@@ -947,7 +971,7 @@ impl MetaAddrChange {
             | UpdatePingSent { .. }
             | UpdateResponded { .. }
             | UpdateMisbehavior { .. } => Responded,
-            UpdateFailed { .. } => Failed,
+            UpdateFailed { .. } | UpdateSelfConnection { .. } => Failed,
         }
     }
 
@@ -1024,6 +1048,10 @@ impl MetaAddrChange {
         instant_now: Instant,
         chrono_now: chrono::DateTime<Utc>,
     ) -> Option<MetaAddr> {
+        if matches!(self, MetaAddrChange::UpdateSelfConnection { .. }) {
+            return None;
+        }
+
         let local_now: DateTime32 = chrono_now.try_into().expect("will succeed until 2038");
 
         let Some(previous) = previous.into() else {

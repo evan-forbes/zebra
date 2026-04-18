@@ -626,6 +626,19 @@ where
     /// Per-connection sequence counter for message ID generation.
     #[cfg(feature = "p2p-tracing")]
     trace_seq: std::sync::atomic::AtomicU64,
+
+    /// Send-path timing tracer.
+    #[cfg(feature = "p2p-tracing")]
+    send_timing_tracer: crate::send_timing::SendTimingTracer,
+
+    /// Per-connection session counters. One summary record is emitted on
+    /// connection close.
+    #[cfg(feature = "p2p-tracing")]
+    session_counters: crate::peer_session::SessionCounters,
+
+    /// Node-level heartbeat tracer; shared with other connections.
+    #[cfg(feature = "p2p-tracing")]
+    heartbeat_tracer: crate::heartbeat::HeartbeatTracer,
 }
 
 impl<S, Tx> fmt::Debug for Connection<S, Tx>
@@ -662,10 +675,31 @@ where
         connection_info: Arc<ConnectionInfo>,
         initial_cached_addrs: Vec<MetaAddr>,
         #[cfg(feature = "p2p-tracing")] p2p_tracer: crate::p2p_tracing::P2pTracer,
+        #[cfg(feature = "p2p-tracing")] send_timing_tracer: crate::send_timing::SendTimingTracer,
+        #[cfg(feature = "p2p-tracing")] session_tracer: crate::peer_session::SessionTracer,
+        #[cfg(feature = "p2p-tracing")] heartbeat_tracer: crate::heartbeat::HeartbeatTracer,
     ) -> Self {
         let metrics_label = connection_info.connected_addr.get_transient_addr_label();
         #[cfg(feature = "p2p-tracing")]
         let p2p_peer_label: Arc<str> = Arc::from(metrics_label.clone());
+
+        #[cfg(feature = "p2p-tracing")]
+        let session_counters = {
+            let direction = if connection_info.connected_addr.is_inbound() {
+                "inbound"
+            } else {
+                "outbound"
+            };
+            crate::peer_session::SessionCounters::new(
+                session_tracer,
+                p2p_peer_label.clone(),
+                connection_info.connection_id,
+                direction,
+            )
+        };
+
+        #[cfg(feature = "p2p-tracing")]
+        heartbeat_tracer.on_session_start();
 
         Connection {
             connection_info,
@@ -686,6 +720,12 @@ where
             p2p_peer_label,
             #[cfg(feature = "p2p-tracing")]
             trace_seq: std::sync::atomic::AtomicU64::new(0),
+            #[cfg(feature = "p2p-tracing")]
+            send_timing_tracer,
+            #[cfg(feature = "p2p-tracing")]
+            session_counters,
+            #[cfg(feature = "p2p-tracing")]
+            heartbeat_tracer,
         }
     }
 }
@@ -697,6 +737,10 @@ where
     async fn send_message(&mut self, msg: Message) -> Result<(), PeerError> {
         #[cfg(feature = "p2p-tracing")]
         self.trace_msg("send", &msg);
+        #[cfg(feature = "p2p-tracing")]
+        self.session_counters.record_sent(&msg);
+        #[cfg(feature = "p2p-tracing")]
+        self.heartbeat_tracer.record_sent(&msg);
 
         self.peer_tx.send(msg).await
     }
@@ -714,8 +758,10 @@ where
     }
 
     #[cfg(feature = "p2p-tracing")]
-    fn trace_received_message(&self, msg: &Message) {
+    fn trace_received_message(&mut self, msg: &Message) {
         self.trace_msg("recv", msg);
+        self.session_counters.record_received(msg);
+        self.heartbeat_tracer.record_received(msg);
     }
 }
 
@@ -1830,6 +1876,14 @@ where
                 "sending an error response to a pending request on a failed connection"
             );
             let _ = tx.send(Err(error.clone()));
+        }
+
+        // Emit the per-session summary trace (only emits once per connection),
+        // and decrement the heartbeat's connected-peers gauge.
+        #[cfg(feature = "p2p-tracing")]
+        if !self.session_counters.has_emitted() {
+            self.heartbeat_tracer.on_session_end();
+            self.session_counters.emit(error.to_string());
         }
     }
 }

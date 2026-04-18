@@ -86,6 +86,14 @@ fn new_test_connection<A>() -> (
         ActiveConnectionCounter::new_counter().track_connection(),
         Arc::new(connection_info),
         Vec::new(),
+        #[cfg(feature = "p2p-tracing")]
+        crate::p2p_tracing::P2pTracer::noop(),
+        #[cfg(feature = "p2p-tracing")]
+        crate::send_timing::SendTimingTracer::noop(),
+        #[cfg(feature = "p2p-tracing")]
+        crate::peer_session::SessionTracer::noop(),
+        #[cfg(feature = "p2p-tracing")]
+        crate::heartbeat::HeartbeatTracer::noop(),
     );
 
     (

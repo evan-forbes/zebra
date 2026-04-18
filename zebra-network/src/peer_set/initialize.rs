@@ -181,6 +181,12 @@ where
 
         #[cfg(feature = "p2p-tracing")]
         let p2p_tracer = crate::p2p_tracing::init_tracing();
+        #[cfg(feature = "p2p-tracing")]
+        let send_timing_tracer = crate::send_timing::init_send_timing();
+        #[cfg(feature = "p2p-tracing")]
+        let session_tracer = crate::peer_session::init_session_tracing();
+        #[cfg(feature = "p2p-tracing")]
+        let heartbeat_tracer = crate::heartbeat::init_heartbeat(latest_chain_tip.clone());
 
         let hs = peer::Handshake::builder()
             .with_config(config.clone())
@@ -193,7 +199,11 @@ where
             .want_transactions(true);
 
         #[cfg(feature = "p2p-tracing")]
-        let hs = hs.with_p2p_tracer(p2p_tracer);
+        let hs = hs
+            .with_p2p_tracer(p2p_tracer)
+            .with_send_timing_tracer(send_timing_tracer)
+            .with_session_tracer(session_tracer)
+            .with_heartbeat_tracer(heartbeat_tracer);
 
         let hs = hs.finish().expect("configured all required parameters");
         (
@@ -1152,7 +1162,7 @@ where
             } else {
                 debug!(?error, ?candidate.addr, "failed to make outbound connection to peer");
             }
-            report_failed(address_book_updater.clone(), candidate).await;
+            report_failed(address_book_updater.clone(), candidate, &error).await;
 
             // The demand signal that was taken out of the queue to attempt to connect to the
             // failed candidate never turned into a connection, so add it back.
@@ -1177,9 +1187,19 @@ where
 async fn report_failed(
     address_book_updater: tokio::sync::mpsc::Sender<MetaAddrChange>,
     addr: MetaAddr,
+    error: &BoxError,
 ) {
-    // The connection info is the same as what's already in the address book.
-    let addr = MetaAddr::new_errored(addr.addr, None);
+    // Remote nonce reuse proves that this address points back at this local
+    // node, so suppress it rather than repeatedly retrying and re-caching it.
+    let addr = if matches!(
+        error.downcast_ref::<peer::HandshakeError>(),
+        Some(peer::HandshakeError::RemoteNonceReuse)
+    ) {
+        MetaAddr::new_self_connection(addr.addr)
+    } else {
+        // The connection info is the same as what's already in the address book.
+        MetaAddr::new_errored(addr.addr, None)
+    };
 
     // Ignore send errors on Zebra shutdown.
     let _ = address_book_updater.send(addr).await;
