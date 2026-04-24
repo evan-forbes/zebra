@@ -1,6 +1,6 @@
 # Regtest with Zebra
 
-The Regtest network in Zebra enables testing of custom functionalities in a private Testnet environment with configurable network upgrade activation heights. It allows for starting an isolated node which won't connect to any peers and currently allows for committing blocks without validating their Proof of Work (in the future, it may use a very low target difficulty and easier Equihash parameters instead of skipping Proof of Work validation altogether).
+The Regtest network in Zebra enables testing of custom functionalities in a private Testnet environment with configurable network upgrade activation heights. It allows for starting an isolated node which won't connect to any peers and uses the easier Regtest Equihash parameter pair, `N = 48`, `K = 5`, for block proposals and internal mining.
 
 By default, Zebra activates network upgrades at height 1 on Regtest, but activation heights are configurable via the `[network.testnet_parameters.activation_heights]` section. Block height 0 is reserved for the Genesis network upgrade.
 
@@ -54,7 +54,7 @@ Add `internal_miner = true` in the mining section of its configuration and compi
 internal_miner = true
 ```
 
-Zebra should now mine blocks on Regtest when it starts after a short delay (of around 30 seconds).
+Zebra should now mine blocks on Regtest when it starts after a short delay (of around 30 seconds). The internal miner automatically uses the Regtest Equihash solver when `network = "Regtest"` is configured.
 
 To confirm that it's working, look for `successfully mined a new block` messages in the logs, or that the tip height is increasing.
 
@@ -95,4 +95,4 @@ let was_submission_successful = submit_block_response.contains(r#""result":null"
 
 See the `regtest_submit_blocks()` acceptance test as a more detailed example for using Zebra's RPC methods to submit blocks on Regtest.
 
-Note: Proof of Work validation is currently disabled on Regtest. If PoW validation is enabled in the future with a low target difficulty and easier Equihash parameters, a configuration option may be added to disable it.
+Note: Proof of Work validation is currently disabled on Regtest, even though Zebra uses the easier Regtest Equihash parameters for proposals and internal mining.

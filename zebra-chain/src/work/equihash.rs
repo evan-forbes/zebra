@@ -142,14 +142,6 @@ impl Solution {
     {
         use crate::shutdown::is_shutting_down;
 
-        // The upstream `equihash` crate only ships `solve_200_9`. Configured testnets that
-        // pick the Regtest pair can verify, but cannot use Zebra's internal miner.
-        assert!(
-            matches!(network.equihash_params(), EquihashParams::Common),
-            "internal miner only supports Equihash (200, 9); upstream equihash crate has no \
-             solver for other parameter pairs",
-        );
-
         let mut input = Vec::new();
         header
             .zcash_serialize(&mut input)
@@ -162,16 +154,28 @@ impl Solution {
             // Don't run the solver if we'd just cancel it anyway.
             cancel_fn()?;
 
-            let solutions = equihash::tromp::solve_200_9(input, || {
-                // Cancel the solver if we have a new template.
-                if cancel_fn().is_err() {
-                    return None;
-                }
+            let solutions = match network.equihash_params() {
+                EquihashParams::Common => equihash::tromp::solve_200_9(input, || {
+                    // Cancel the solver if we have a new template.
+                    if cancel_fn().is_err() {
+                        return None;
+                    }
 
-                // This skips the first nonce, which doesn't matter in practice.
-                Self::next_nonce(&mut header.nonce);
-                Some(*header.nonce)
-            });
+                    // This skips the first nonce, which doesn't matter in practice.
+                    Self::next_nonce(&mut header.nonce);
+                    Some(*header.nonce)
+                }),
+                EquihashParams::Regtest => equihash::tromp::solve_48_5(input, || {
+                    // Cancel the solver if we have a new template.
+                    if cancel_fn().is_err() {
+                        return None;
+                    }
+
+                    // This skips the first nonce, which doesn't matter in practice.
+                    Self::next_nonce(&mut header.nonce);
+                    Some(*header.nonce)
+                }),
+            };
 
             let mut valid_solutions = Vec::new();
 

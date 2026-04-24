@@ -69,7 +69,7 @@ derive-new = "0.5"
 dirs = "6.0"
 ed25519-zebra = "4.0.3"
 elasticsearch = { version = "8.17.0-alpha.1", default-features = false }
-equihash = "0.2.2"
+equihash = { git = "https://github.com/evan-forbes/librustzcash.git", rev = "08a1d4b6f3185ca9ff9a799d815ab4985c3ae41e", version = "0.3" }
 ff = "0.13"
 futures = "0.3.31"
 futures-core = "0.3.31"

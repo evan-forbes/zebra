@@ -1,7 +1,10 @@
 //! Fixed test vectors for zebra-network configuration.
 
 use static_assertions::const_assert;
-use zebra_chain::parameters::testnet::{self, ConfiguredFundingStreams};
+use zebra_chain::parameters::{
+    testnet::{self, ConfiguredFundingStreams},
+    EquihashParams,
+};
 
 use crate::{
     constants::{INBOUND_PEER_LIMIT_MULTIPLIER, OUTBOUND_PEER_LIMIT_MULTIPLIER},
@@ -74,6 +77,35 @@ fn testnet_params_serialization_roundtrip() {
     let deserialized: Config = toml::from_str(&serialized).unwrap();
 
     assert_eq!(config, deserialized);
+}
+
+#[test]
+fn regtest_config_uses_regtest_equihash_params() {
+    let _init_guard = zebra_test::init();
+
+    let config: Config = toml::from_str("network = 'Regtest'").unwrap();
+
+    assert_eq!(config.network.equihash_params(), EquihashParams::Regtest);
+}
+
+#[test]
+fn configured_testnet_can_use_regtest_equihash_params() {
+    let _init_guard = zebra_test::init();
+
+    let config: Config = toml::from_str(
+        r#"
+        network = 'Testnet'
+        initial_testnet_peers = []
+
+        [testnet_parameters]
+        network_name = 'EasyTestnet'
+        checkpoints = true
+        equihash_params = 'regtest'
+        "#,
+    )
+    .unwrap();
+
+    assert_eq!(config.network.equihash_params(), EquihashParams::Regtest);
 }
 
 #[test]

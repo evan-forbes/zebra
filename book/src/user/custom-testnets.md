@@ -9,7 +9,8 @@ Zebra's Testnet can be configured with custom:
 - Network magics,
 - Slow start intervals,
 - Genesis hashes, and
-- Target difficulty limits.
+- Target difficulty limits,
+- Equihash parameters.
 
 It's also possible to disable Proof-of-Work validation by setting `disable_pow` to `true` so that blocks can be mined onto the chain without valid Equihash solutions, nor block hashes below their target difficulties.
 
@@ -41,6 +42,9 @@ network_magic = [0, 1, 0, 255]
 slow_start_interval = 0
 target_difficulty_limit = "0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f"
 disable_pow = true
+# Optional: use the easier Regtest Equihash pair, N = 48, K = 5.
+# Omit this field to use the normal Zcash pair, N = 200, K = 9.
+equihash_params = "regtest"
 
 # Configured activation heights must be greater than 0, and less than
 # 2^31. Block height 0 is reserved for the Genesis network upgrade in Zebra.

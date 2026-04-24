@@ -40,7 +40,7 @@ use zebra_rpc::{
 };
 use zebra_state::WatchReceiver;
 
-use crate::components::metrics::Config;
+use zebra_rpc::config::mining::Config;
 
 /// The amount of time we wait between block template retries.
 pub const BLOCK_TEMPLATE_WAIT_TIME: Duration = Duration::from_secs(20);

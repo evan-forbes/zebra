@@ -39,15 +39,14 @@ const DEFAULT_POW_MAX_ADJUST_DOWN_PERCENT: i32 = 32;
 
 /// The (N, K) Equihash parameter pair to use for a network.
 ///
-/// Only paired variants are supported, because the upstream `equihash` crate exposes a
-/// hard-coded solver per pair. Verification accepts arbitrary `(N, K)` but solving does not.
+/// Only paired variants are supported, because the `equihash` crate exposes a hard-coded solver
+/// per pair. Verification accepts arbitrary `(N, K)` but solving does not.
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum EquihashParams {
     /// Mainnet/Testnet pair: `N = 200`, `K = 9`. 1344-byte solutions.
     Common,
-    /// Regtest pair: `N = 48`, `K = 5`. 36-byte solutions. Verifies but does not solve;
-    /// the upstream `equihash` crate only ships `solve_200_9`.
+    /// Regtest pair: `N = 48`, `K = 5`. 36-byte solutions.
     Regtest,
 }
 
@@ -1225,6 +1224,7 @@ impl Parameters {
             // This value is chosen to match zcashd, see: <https://github.com/zcash/zcash/blob/master/src/chainparams.cpp#L654>
             .with_target_difficulty_limit(U256::from_big_endian(&[0x0f; 32]))?
             .with_disable_pow(true)
+            .with_equihash_params(EquihashParams::Regtest)
             .with_unshielded_coinbase_spends(true)
             .with_slow_start_interval(Height::MIN)
             // Removes default Testnet activation heights if not configured,

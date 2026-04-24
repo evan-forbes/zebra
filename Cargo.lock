@@ -1103,6 +1103,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "corez"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4df6f98652d30167eaeea34d77b730e07c8caba6df17bd4551842b9b8da01deb"
+
+[[package]]
 name = "cpufeatures"
 version = "0.2.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1598,8 +1604,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ca4f333d4ccc9d23c06593733673026efa71a332e028b00f12cf427b9677dce9"
 dependencies = [
  "blake2b_simd",
- "cc",
  "core2",
+]
+
+[[package]]
+name = "equihash"
+version = "0.3.0"
+source = "git+https://github.com/evan-forbes/librustzcash.git?rev=08a1d4b6f3185ca9ff9a799d815ab4985c3ae41e#08a1d4b6f3185ca9ff9a799d815ab4985c3ae41e"
+dependencies = [
+ "blake2b_simd",
+ "cc",
+ "corez",
  "document-features",
 ]
 
@@ -7137,7 +7152,7 @@ dependencies = [
  "core2",
  "crypto-common 0.2.0-rc.1",
  "document-features",
- "equihash",
+ "equihash 0.2.2",
  "ff",
  "fpe",
  "getset",
@@ -7274,7 +7289,7 @@ dependencies = [
  "derive-getters",
  "dirs",
  "ed25519-zebra",
- "equihash",
+ "equihash 0.3.0",
  "futures",
  "group",
  "halo2_proofs",
