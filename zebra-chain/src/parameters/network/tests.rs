@@ -15,9 +15,41 @@ use crate::{
             height_for_halving, ParameterSubsidy as _,
         },
         testnet::{self, ConfiguredActivationHeights},
-        NetworkUpgrade, NU7_POW_TARGET_SPACING_RATIO,
+        NetworkUpgrade, NU7_POW_TARGET_SPACING_RATIO, POST_BLOSSOM_POW_TARGET_SPACING,
+        POST_NU7_POW_TARGET_SPACING,
     },
 };
+
+#[test]
+fn target_spacing_changes_at_nu7_activation_height() -> Result<(), Report> {
+    let network = testnet::Parameters::build()
+        .with_activation_heights(ConfiguredActivationHeights {
+            blossom: Some(1),
+            nu7: Some(10),
+            ..Default::default()
+        })
+        .expect("activation heights are valid")
+        .clear_funding_streams()
+        .to_network()
+        .expect("configured testnet is valid");
+
+    assert_eq!(
+        i64::from(POST_BLOSSOM_POW_TARGET_SPACING),
+        NetworkUpgrade::target_spacing_for_height(&network, Height(9)).num_seconds()
+    );
+
+    assert_eq!(
+        i64::from(POST_NU7_POW_TARGET_SPACING),
+        NetworkUpgrade::target_spacing_for_height(&network, Height(10)).num_seconds()
+    );
+
+    assert_eq!(
+        i64::from(POST_NU7_POW_TARGET_SPACING),
+        NetworkUpgrade::target_spacing_for_height(&network, Height(11)).num_seconds()
+    );
+
+    Ok(())
+}
 
 #[test]
 fn halving_test() -> Result<(), Report> {
