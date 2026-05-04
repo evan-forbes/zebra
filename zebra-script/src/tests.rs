@@ -3,15 +3,15 @@
 use hex::FromHex;
 use std::sync::Arc;
 use zebra_chain::{
-    block,
-    parameters::NetworkUpgrade,
+    block::{self, Height},
+    parameters::{Network, NetworkUpgrade},
     serialization::{ZcashDeserialize, ZcashDeserializeInto},
     transaction::{self, HashType, LockTime, SigHasher, Transaction},
     transparent::{self, Output},
 };
 use zebra_test::prelude::*;
 
-use crate::Sigops;
+use crate::{p2sh_sigop_count, Sigops};
 
 lazy_static::lazy_static! {
     pub static ref SCRIPT_PUBKEY: Vec<u8> = <Vec<u8>>::from_hex("76a914f47cac1e6fec195c055994e8064ffccce0044dd788ac")
@@ -434,6 +434,171 @@ fn sighash_divergence_v5_p2pkh_malformed_0x84_wrong_canonical_type_rejected() {
     );
 }
 
+/// Build a V5 transaction with two transparent inputs and one transparent output,
+/// sign the input at `signed_input_index` with SIGHASH_SINGLE (or
+/// SIGHASH_SINGLE|ANYONECANPAY when `anyone_can_pay` is set) using whatever
+/// digest Zebra computes for that input, and run that input through the script
+/// verifier.
+///
+/// This reproduces the ZIP-244 §S.2a "no corresponding output" scenario from
+/// GHSA-cwfq-rfcr-8hmp: the transaction has fewer transparent outputs than
+/// inputs, so for `signed_input_index >= 1` there is no `vout[k]` for the input
+/// being signed. `zcashd` rejects this at script verification; before the fix,
+/// Zebra accepted it because librustzcash returned a digest computed from an
+/// empty output list instead of failing.
+fn build_and_verify_v5_p2pkh_single_with_missing_output(
+    signed_input_index: usize,
+    anyone_can_pay: bool,
+) -> std::result::Result<(), crate::Error> {
+    use ripemd::{Digest as _, Ripemd160};
+    use secp256k1::{Message, Secp256k1, SecretKey};
+    use sha2::Sha256;
+
+    assert!(signed_input_index < 2, "test fixture only has two inputs");
+
+    let secp = Secp256k1::new();
+    let secret_key = SecretKey::from_slice(&[0xcd; 32]).expect("valid secret key");
+    let public_key = secp256k1::PublicKey::from_secret_key(&secp, &secret_key);
+    let pubkey_bytes = public_key.serialize();
+
+    // Standard P2PKH lock script reused for every prevout.
+    let sha_hash = Sha256::digest(pubkey_bytes);
+    let pub_key_hash: [u8; 20] = Ripemd160::digest(sha_hash).into();
+    let mut lock_script_bytes = vec![0x76, 0xa9, 0x14];
+    lock_script_bytes.extend_from_slice(&pub_key_hash);
+    lock_script_bytes.push(0x88);
+    lock_script_bytes.push(0xac);
+    let lock_script = transparent::Script::new(&lock_script_bytes);
+
+    let prevout = || transparent::Output {
+        value: 1_0000_0000u64.try_into().expect("valid amount"),
+        lock_script: lock_script.clone(),
+    };
+    let all_previous_outputs = Arc::new(vec![prevout(), prevout()]);
+
+    // Two inputs, one output: any input at index >= 1 has no corresponding
+    // output for SIGHASH_SINGLE.
+    let make_tx = |unlock_scripts: [Vec<u8>; 2]| Transaction::V5 {
+        network_upgrade: NetworkUpgrade::Nu5,
+        lock_time: LockTime::unlocked(),
+        expiry_height: block::Height(0),
+        inputs: vec![
+            transparent::Input::PrevOut {
+                outpoint: transparent::OutPoint {
+                    hash: transaction::Hash([0u8; 32]),
+                    index: 0,
+                },
+                unlock_script: transparent::Script::new(&unlock_scripts[0]),
+                sequence: u32::MAX,
+            },
+            transparent::Input::PrevOut {
+                outpoint: transparent::OutPoint {
+                    hash: transaction::Hash([1u8; 32]),
+                    index: 0,
+                },
+                unlock_script: transparent::Script::new(&unlock_scripts[1]),
+                sequence: u32::MAX,
+            },
+        ],
+        outputs: vec![transparent::Output {
+            value: 1_5000_0000u64.try_into().expect("valid amount"),
+            lock_script: transparent::Script::new(&[0x00]),
+        }],
+        sapling_shielded_data: None,
+        orchard_shielded_data: None,
+    };
+
+    let placeholder_tx = make_tx([Vec::new(), Vec::new()]);
+
+    let canonical_hash_type = if anyone_can_pay {
+        HashType::SINGLE | HashType::ANYONECANPAY
+    } else {
+        HashType::SINGLE
+    };
+    let raw_hash_type_byte = if anyone_can_pay { 0x83u8 } else { 0x03u8 };
+
+    let sighasher = SigHasher::new(
+        &placeholder_tx,
+        NetworkUpgrade::Nu5,
+        all_previous_outputs.clone(),
+    )
+    .expect("sighasher creation should succeed");
+    let sighash = sighasher.sighash(
+        canonical_hash_type,
+        Some((signed_input_index, lock_script_bytes.clone())),
+    );
+
+    let msg = Message::from_digest(*sighash.as_ref());
+    let signature = secp.sign_ecdsa(&msg, &secret_key);
+    let der_sig = signature.serialize_der();
+
+    let mut signed_unlock = Vec::new();
+    signed_unlock.push((der_sig.len() + 1) as u8);
+    signed_unlock.extend_from_slice(&der_sig);
+    signed_unlock.push(raw_hash_type_byte);
+    signed_unlock.push(pubkey_bytes.len() as u8);
+    signed_unlock.extend_from_slice(&pubkey_bytes);
+
+    // Other input is left empty; it isn't being verified by this call.
+    let mut unlock_scripts: [Vec<u8>; 2] = [Vec::new(), Vec::new()];
+    unlock_scripts[signed_input_index] = signed_unlock;
+
+    let final_tx = make_tx(unlock_scripts);
+
+    let verifier = super::CachedFfiTransaction::new(
+        Arc::new(final_tx),
+        all_previous_outputs,
+        NetworkUpgrade::Nu5,
+    )
+    .expect("network upgrade should be valid for v5 tx");
+    verifier.is_valid(signed_input_index)
+}
+
+/// V5 SIGHASH_SINGLE on input 1 of a 2-in/1-out transaction must be rejected:
+/// there is no `vout[1]` to commit to.
+///
+/// Before the fix, Zebra accepted this because librustzcash returns a digest
+/// computed from an empty output list when the input index is past the output
+/// vector. ZIP-244 §S.2a requires consensus-level rejection; zcashd enforces it.
+#[test]
+fn sighash_divergence_v5_sighash_single_no_corresponding_output_rejected() {
+    let _init_guard = zebra_test::init();
+
+    let result = build_and_verify_v5_p2pkh_single_with_missing_output(1, false);
+
+    assert!(
+        result.is_err(),
+        "V5 SIGHASH_SINGLE with no corresponding output must fail script verification, \
+         matching zcashd (ZIP-244 §S.2a)"
+    );
+}
+
+/// Same as above with SIGHASH_SINGLE|ANYONECANPAY (0x83). The
+/// corresponding-output rule applies regardless of the ANYONECANPAY flag.
+#[test]
+fn sighash_divergence_v5_sighash_single_anyonecanpay_no_corresponding_output_rejected() {
+    let _init_guard = zebra_test::init();
+
+    let result = build_and_verify_v5_p2pkh_single_with_missing_output(1, true);
+
+    assert!(
+        result.is_err(),
+        "V5 SIGHASH_SINGLE|ANYONECANPAY with no corresponding output must fail script \
+         verification, matching zcashd (ZIP-244 §S.2a)"
+    );
+}
+
+/// Positive control: SIGHASH_SINGLE on input 0 of a 2-in/1-out transaction is
+/// valid because `vout[0]` exists. This guards against the new check rejecting
+/// legitimate SIGHASH_SINGLE spends.
+#[test]
+fn sighash_divergence_v5_sighash_single_with_corresponding_output_accepted() {
+    let _init_guard = zebra_test::init();
+
+    build_and_verify_v5_p2pkh_single_with_missing_output(0, false)
+        .expect("V5 SIGHASH_SINGLE on an input with a corresponding output should be accepted");
+}
+
 /// Build a V4 P2PKH transparent spend, sign it under the supplied raw `hash_type`
 /// byte using the V4 raw-byte sighash semantics, and run it through the script
 /// verifier.
@@ -687,4 +852,521 @@ fn sighash_divergence_from_bits_canonicalization() {
             "valid byte {raw_byte:#x} should pass strict"
         );
     }
+}
+
+/// Regression test for [GHSA-jv4h-j224-23cc] (Trigger A, "Coinbase Hidden Legacy Sigops").
+///
+/// zcashd's `GetLegacySigOpCount()` counts sigops in the coinbase input's `scriptSig`. Zebra
+/// previously skipped the coinbase input entirely, so a miner could hide up to ~98 sigops (the
+/// coinbase script length limit is 100 bytes) inside the coinbase `scriptSig` and avoid them being
+/// charged against `MAX_BLOCK_SIGOPS`.
+///
+/// This test builds a v5 coinbase transaction whose `miner_data` consists entirely of `OP_CHECKSIG`
+/// (`0xac`) bytes and asserts that `tx.sigops()` now returns the expected count covering every
+/// `OP_CHECKSIG`.
+///
+/// [GHSA-jv4h-j224-23cc]: https://github.com/ZcashFoundation/zebra/security/advisories/GHSA-jv4h-j224-23cc
+#[test]
+fn count_coinbase_legacy_sigops_includes_coinbase_script() -> Result<()> {
+    let _init_guard = zebra_test::init();
+
+    // 80 bytes of OP_CHECKSIG fits within the 100-byte coinbase script limit
+    // even after the height prefix.
+    const OP_CHECKSIG: u8 = 0xac;
+    let miner_data = vec![OP_CHECKSIG; 80];
+
+    let dummy_output_script = transparent::Script::new(&[0x51]); // OP_TRUE
+    let output_amount = zebra_chain::amount::Amount::try_from(1_000_000)?;
+
+    // Use a height after NU5 activation on Mainnet so v5 is the effective version.
+    let network = Network::Mainnet;
+    let height = NetworkUpgrade::Nu5
+        .activation_height(&network)
+        .expect("NU5 has a Mainnet activation height");
+
+    let tx = Transaction::new_v5_coinbase(
+        &network,
+        height,
+        vec![(output_amount, dummy_output_script)],
+        miner_data,
+    );
+
+    // Before the fix, Zebra's `Sigops` impl skipped the coinbase input and returned 0 for a
+    // coinbase with no OP_CHECKSIG in its outputs. After the fix, every OP_CHECKSIG in the coinbase
+    // `scriptSig` must be counted.
+    let sigops = tx.sigops().expect("sigop count is finite");
+    assert_eq!(
+        sigops, 80,
+        "coinbase scriptSig OP_CHECKSIG bytes must be counted against \
+         MAX_BLOCK_SIGOPS (zcashd parity, GHSA-jv4h-j224-23cc)"
+    );
+
+    Ok(())
+}
+
+/// Regression test for [GHSA-jv4h-j224-23cc] (Trigger B, "Aggregate P2SH Sigops").
+///
+/// zcashd's `GetP2SHSigOpCount()` parses the redeem script (the last push in each P2SH input's
+/// `scriptSig`) with `accurate=true` and sums the sigops across all inputs. Previously Zebra only
+/// did this in the mempool policy, so a block containing P2SH inputs whose aggregate redeem-script
+/// sigops exceeded `MAX_BLOCK_SIGOPS` could be accepted by Zebra but rejected by zcashd as
+/// `bad-blk-sigops`.
+///
+/// This test exercises the free function `zebra_script::p2sh_sigop_count` directly on a synthetic
+/// transaction with one P2SH input whose redeem script is 15 x OP_CHECKSIG.
+///
+/// [GHSA-jv4h-j224-23cc]: https://github.com/ZcashFoundation/zebra/security/advisories/GHSA-jv4h-j224-23cc
+#[test]
+fn p2sh_sigop_count_counts_redeem_script() -> Result<()> {
+    let _init_guard = zebra_test::init();
+
+    const OP_CHECKSIG: u8 = 0xac;
+    const OP_HASH160: u8 = 0xa9;
+    const OP_EQUAL: u8 = 0x87;
+
+    // Redeem script: 15 x OP_CHECKSIG. Each OP_CHECKSIG counts as 1.
+    let redeem_script = vec![OP_CHECKSIG; 15];
+
+    // scriptSig consists solely of a direct push of the redeem script. For a 15-byte payload we can
+    // use the literal-length push opcode (0x01..=0x4b), which is just the length byte followed by
+    // the data.
+    let mut unlock_bytes = Vec::new();
+    unlock_bytes.push(redeem_script.len() as u8);
+    unlock_bytes.extend_from_slice(&redeem_script);
+    let unlock_script = transparent::Script::new(&unlock_bytes);
+
+    // scriptPubKey: OP_HASH160 <20 bytes> OP_EQUAL. The 20-byte payload value is irrelevant here:
+    // `is_pay_to_script_hash()` only checks the length (23) and the surrounding opcodes.
+    let mut lock_bytes = Vec::with_capacity(23);
+    lock_bytes.push(OP_HASH160);
+    lock_bytes.push(0x14);
+    lock_bytes.extend_from_slice(&[0u8; 20]);
+    lock_bytes.push(OP_EQUAL);
+    let lock_script = transparent::Script::new(&lock_bytes);
+
+    // Build a minimal non-coinbase transaction with a single P2SH input.
+    let input = transparent::Input::PrevOut {
+        outpoint: transparent::OutPoint {
+            hash: zebra_chain::transaction::Hash([0u8; 32]),
+            index: 0,
+        },
+        unlock_script,
+        sequence: u32::MAX,
+    };
+
+    let spent_output = transparent::Output {
+        value: zebra_chain::amount::Amount::try_from(1_000_000)?,
+        lock_script,
+    };
+
+    let tx = Transaction::V5 {
+        network_upgrade: NetworkUpgrade::Nu5,
+        inputs: vec![input],
+        outputs: vec![spent_output.clone()],
+        lock_time: LockTime::unlocked(),
+        expiry_height: Height(0),
+        sapling_shielded_data: None,
+        orchard_shielded_data: None,
+    };
+
+    assert_eq!(
+        p2sh_sigop_count(&tx, std::slice::from_ref(&spent_output)),
+        15,
+        "P2SH redeem-script sigops must be counted against block-path \
+         MAX_BLOCK_SIGOPS (zcashd parity, GHSA-jv4h-j224-23cc)"
+    );
+
+    // The `CachedFfiTransaction::p2sh_sigops()` method must delegate to the same counter, so the
+    // block-verifier path yields the same count.
+    let cached = super::CachedFfiTransaction::new(
+        Arc::new(tx),
+        Arc::new(vec![spent_output]),
+        NetworkUpgrade::Nu5,
+    )
+    .expect("network upgrade should be valid for tx");
+    assert_eq!(cached.p2sh_sigops(), 15);
+
+    Ok(())
+}
+
+/// Non-P2SH inputs, and coinbase inputs, must contribute zero P2SH sigops regardless of what bytes
+/// appear in their `scriptSig`. zcashd skips the coinbase input in [`GetP2SHSigOpCount()`].
+///
+/// [`GetP2SHSigOpCount()`]: https://github.com/zcash/zcash/blob/bad7f7eadbbb3466bebe3354266c7f69f607fcfd/src/main.cpp#L770-L772
+#[test]
+fn p2sh_sigop_count_is_zero_for_non_p2sh_and_coinbase() -> Result<()> {
+    let _init_guard = zebra_test::init();
+
+    const OP_CHECKSIG: u8 = 0xac;
+
+    // Build a coinbase tx with OP_CHECKSIG-filled `miner_data`: legacy counting sees these (Trigger
+    // A), but P2SH counting must not.
+    let network = Network::Mainnet;
+    let nu5_height = NetworkUpgrade::Nu5
+        .activation_height(&network)
+        .expect("NU5 has a Mainnet activation height");
+    let dummy_output_script = transparent::Script::new(&[0x51]);
+    let output_amount = zebra_chain::amount::Amount::try_from(1_000_000)?;
+    let coinbase_tx = Transaction::new_v5_coinbase(
+        &network,
+        nu5_height,
+        vec![(output_amount, dummy_output_script.clone())],
+        vec![OP_CHECKSIG; 80],
+    );
+
+    // Coinbase inputs have no spent output; zcashd passes an empty vector.
+    assert_eq!(p2sh_sigop_count(&coinbase_tx, &[]), 0);
+
+    // A non-P2SH (p2pkh-shaped) lock script must also yield 0 P2SH sigops, even if the scriptSig's
+    // last push happens to contain OP_CHECKSIG.
+    let p2pkh_lock = transparent::Script::new(&hex::decode(
+        "76a914f47cac1e6fec195c055994e8064ffccce0044dd788ac",
+    )?);
+    let mut unlock_bytes = vec![0x01_u8]; // single-byte push
+    unlock_bytes.push(OP_CHECKSIG);
+    let input = transparent::Input::PrevOut {
+        outpoint: transparent::OutPoint {
+            hash: zebra_chain::transaction::Hash([0u8; 32]),
+            index: 0,
+        },
+        unlock_script: transparent::Script::new(&unlock_bytes),
+        sequence: u32::MAX,
+    };
+    let spent_output = transparent::Output {
+        value: zebra_chain::amount::Amount::try_from(1_000_000)?,
+        lock_script: p2pkh_lock,
+    };
+    let tx = Transaction::V5 {
+        network_upgrade: NetworkUpgrade::Nu5,
+        inputs: vec![input],
+        outputs: vec![],
+        lock_time: LockTime::unlocked(),
+        expiry_height: Height(0),
+        sapling_shielded_data: None,
+        orchard_shielded_data: None,
+    };
+    assert_eq!(p2sh_sigop_count(&tx, &[spent_output]), 0);
+
+    Ok(())
+}
+
+/// End-to-end regression test for [GHSA-jv4h-j224-23cc].
+///
+/// Reproduces the consensus-split condition: a block whose true `zcashd` transparent sigop total
+/// (legacy + P2SH, including coinbase legacy) exceeds `MAX_BLOCK_SIGOPS = 20000`. Before the fix,
+/// Zebra computed a reduced total that fit under the limit and accepted such a block.
+///
+/// This test exercises the same accumulation the block verifier performs in
+/// `zebra_consensus::block::verify_block` (`block.rs` `sigops += response.sigops()`), where each
+/// transaction's contribution is `tx.sigops() + cached.p2sh_sigops()` (set in
+/// `zebra_consensus::transaction.rs`'s `Block`-path response).
+///
+/// Asserts:
+/// - the legacy-only total (Zebra's pre-fix accounting) is below the limit;
+/// - the legacy + P2SH total (Zebra's post-fix, zcashd-equivalent accounting) exceeds the limit,
+///   demonstrating the consensus split is now visible to the block verifier.
+///
+/// [GHSA-jv4h-j224-23cc]: https://github.com/ZcashFoundation/zebra/security/advisories/GHSA-jv4h-j224-23cc
+#[test]
+fn block_sigop_total_includes_coinbase_and_p2sh() -> Result<()> {
+    let _init_guard = zebra_test::init();
+
+    /// Matches `zebra_consensus::MAX_BLOCK_SIGOPS`. Hard-coded to avoid a reverse dependency on
+    /// `zebra-consensus`.
+    const MAX_BLOCK_SIGOPS: u32 = 20_000;
+    const OP_CHECKSIG: u8 = 0xac;
+    const OP_HASH160: u8 = 0xa9;
+    const OP_EQUAL: u8 = 0x87;
+
+    // Surface A: 80 OP_CHECKSIG bytes hidden in the coinbase scriptSig
+    // (the coinbase script length limit is 100 bytes, including the height prefix).
+    let network = Network::Mainnet;
+    let nu5_height = NetworkUpgrade::Nu5
+        .activation_height(&network)
+        .expect("NU5 has a Mainnet activation height");
+    let dummy_output_script = transparent::Script::new(&[0x51]); // OP_TRUE
+    let output_amount = zebra_chain::amount::Amount::try_from(1_000_000)?;
+    let coinbase_tx = Transaction::new_v5_coinbase(
+        &network,
+        nu5_height,
+        vec![(output_amount, dummy_output_script)],
+        vec![OP_CHECKSIG; 80],
+    );
+
+    // Surface B: each non-coinbase transaction has one P2SH input whose
+    // 15-byte redeem script is 15 x OP_CHECKSIG, contributing 15 P2SH
+    // sigops (the maximum standard P2SH redeem-script sigop count).
+    let redeem_script = vec![OP_CHECKSIG; 15];
+    let mut unlock_bytes = vec![redeem_script.len() as u8];
+    unlock_bytes.extend_from_slice(&redeem_script);
+    let unlock_script = transparent::Script::new(&unlock_bytes);
+
+    let mut lock_bytes = Vec::with_capacity(23);
+    lock_bytes.push(OP_HASH160);
+    lock_bytes.push(0x14);
+    lock_bytes.extend_from_slice(&[0u8; 20]);
+    lock_bytes.push(OP_EQUAL);
+    let lock_script = transparent::Script::new(&lock_bytes);
+
+    let p2sh_input = transparent::Input::PrevOut {
+        outpoint: transparent::OutPoint {
+            hash: zebra_chain::transaction::Hash([0u8; 32]),
+            index: 0,
+        },
+        unlock_script,
+        sequence: u32::MAX,
+    };
+    let p2sh_spent_output = transparent::Output {
+        value: zebra_chain::amount::Amount::try_from(1_000_000)?,
+        lock_script,
+    };
+    let p2sh_tx_template = Transaction::V5 {
+        network_upgrade: NetworkUpgrade::Nu5,
+        inputs: vec![p2sh_input],
+        outputs: vec![],
+        lock_time: LockTime::unlocked(),
+        expiry_height: Height(0),
+        sapling_shielded_data: None,
+        orchard_shielded_data: None,
+    };
+
+    // 1334 P2SH spends * 15 sigops = 20010 P2SH sigops.
+    // Plus 80 coinbase legacy sigops = 20090 total, > MAX_BLOCK_SIGOPS.
+    // The legacy-only total Zebra used to compute is 0 (pre-fix coinbase)
+    // or 80 (post-fix coinbase), both well under the limit.
+    const N_P2SH_TXS: u32 = 1334;
+    let spent_outputs = std::slice::from_ref(&p2sh_spent_output);
+
+    let coinbase_legacy = coinbase_tx.sigops().expect("sigop count is finite");
+    let p2sh_legacy = p2sh_tx_template.sigops().expect("sigop count is finite");
+    let p2sh_per_tx = p2sh_sigop_count(&p2sh_tx_template, spent_outputs);
+    assert_eq!(coinbase_legacy, 80, "coinbase legacy sigops (Surface A)");
+    assert_eq!(p2sh_per_tx, 15, "per-tx P2SH sigops (Surface B)");
+
+    // Post-fix accounting matches what the block verifier accumulates in
+    // `zebra_consensus::block::verify_block` via `response.sigops()`, where the response is built
+    // in `zebra_consensus::transaction.rs`'s `Block`-path arm as `tx.sigops() +
+    // cached.p2sh_sigops()`.
+    //
+    // Non-coinbase txs contribute legacy sigops from their inputs and outputs; here `p2sh_legacy`
+    // is 0 (the redeem script bytes inside the scriptSig are NOT executed at the legacy level for a
+    // literal push-only scriptSig).
+    let post_fix_total = coinbase_legacy
+        .saturating_add(N_P2SH_TXS.saturating_mul(p2sh_legacy.saturating_add(p2sh_per_tx)));
+
+    assert!(
+        post_fix_total > MAX_BLOCK_SIGOPS,
+        "post-fix accounting must exceed MAX_BLOCK_SIGOPS to demonstrate \
+         the consensus split is now visible: got {post_fix_total}"
+    );
+
+    Ok(())
+}
+
+/// Calling `is_valid` when `all_previous_outputs.len()` differs from `transaction.inputs().len()`
+/// must return `Error::TxIndex`, even when the requested `input_index` is in range for
+/// `all_previous_outputs`. This guards against verifying a script against a misaligned
+/// previous output.
+#[test]
+fn is_valid_rejects_mismatched_previous_outputs_length() {
+    let _init_guard = zebra_test::init();
+
+    let transaction = SCRIPT_TX
+        .zcash_deserialize_into::<Arc<zebra_chain::transaction::Transaction>>()
+        .expect("test fixture deserializes");
+
+    // SCRIPT_TX has exactly one input. Pass two previous outputs so `.get(0)` succeeds
+    // but the lengths disagree.
+    let output = Output {
+        value: (212 * u64::pow(10, 8)).try_into().expect("valid amount"),
+        lock_script: transparent::Script::new(&SCRIPT_PUBKEY),
+    };
+    let mismatched_outputs = Arc::new(vec![output.clone(), output]);
+
+    let verifier =
+        super::CachedFfiTransaction::new(transaction, mismatched_outputs, NetworkUpgrade::Blossom)
+            .expect("constructor accepts mismatched-length outputs");
+
+    let err = verifier
+        .is_valid(0)
+        .expect_err("mismatched length must be rejected by is_valid");
+    assert_eq!(err, super::Error::TxIndex);
+}
+
+/// Calling `is_valid` with an `input_index` past the end of `all_previous_outputs` must
+/// return `Error::TxIndex` instead of panicking.
+#[test]
+fn is_valid_rejects_out_of_range_input_index() {
+    let _init_guard = zebra_test::init();
+
+    let transaction = SCRIPT_TX
+        .zcash_deserialize_into::<Arc<zebra_chain::transaction::Transaction>>()
+        .expect("test fixture deserializes");
+    let output = Output {
+        value: (212 * u64::pow(10, 8)).try_into().expect("valid amount"),
+        lock_script: transparent::Script::new(&SCRIPT_PUBKEY),
+    };
+    let previous_outputs = Arc::new(vec![output]);
+
+    let verifier =
+        super::CachedFfiTransaction::new(transaction, previous_outputs, NetworkUpgrade::Blossom)
+            .expect("matched-length construction succeeds");
+
+    // SCRIPT_TX has one input at index 0; index 1 is out of range.
+    let err = verifier
+        .is_valid(1)
+        .expect_err("out-of-range input_index must error, not panic");
+    assert_eq!(err, super::Error::TxIndex);
+}
+
+/// Regression test for the libzcash_script stale-sighash-buffer bypass.
+///
+/// Construct a V5 transaction whose scriptPubKey is:
+///
+/// ```text
+/// <pubkey> OP_CHECKSIGVERIFY <pubkey> OP_CHECKSIG
+/// ```
+///
+/// and whose scriptSig pushes two signatures over the same canonical
+/// `SIGHASH_ALL` (0x01) digest, the first tagged with an *invalid* V5
+/// hash-type byte (0x50) and the second tagged with the canonical 0x01:
+///
+/// ```text
+/// <der_sig || 0x50>   (pushed first → bottom of stack)
+/// <der_sig || 0x01>   (pushed second → top of stack)
+/// ```
+///
+/// Script evaluation then:
+///
+/// 1. Consumes `<der_sig || 0x01>` via `OP_CHECKSIGVERIFY`. Zebra's callback
+///    returns the canonical SIGHASH_ALL digest, the C++ verifier fills its
+///    stack-local `sighashArray` with that digest, and the signature passes.
+/// 2. Consumes `<der_sig || 0x50>` via `OP_CHECKSIG`. Zebra's callback sees
+///    an invalid V5 hash-type byte. Prior to this fix the callback returned
+///    `None`, libzcash_script silently wrote nothing to the C++ buffer, and
+///    the C++ `CheckSig` verified the signature against the stale
+///    SIGHASH_ALL digest from step 1 — accepting a spend that `zcashd`
+///    rejects and splitting Zebra nodes from `zcashd` nodes.
+///
+/// With the defense-in-depth fix in `zebra-script::calculate_sighash`, the
+/// callback now returns a per-call CSPRNG-derived sighash when the hash
+/// type would have been rejected, so the second signature fails to verify
+/// and `is_valid` returns an error — matching `zcashd`.
+///
+/// The bypass requires release-grade C++ optimizations in `libzcash_script`
+/// (so the stack buffer is not zero-initialized and the prior digest
+/// lingers between callbacks). The workspace `Cargo.toml` forces
+/// `[profile.dev.package.libzcash_script]` to `opt-level = 3` in all
+/// profiles so that `cargo test` exercises the vulnerable code path and
+/// this regression test catches any re-introduction of the bug in both
+/// dev and release builds.
+#[test]
+fn stale_sighash_buffer_v5_two_checksig_rejected() {
+    use secp256k1::{Message, Secp256k1, SecretKey};
+
+    let _init_guard = zebra_test::init();
+
+    let secp = Secp256k1::new();
+    let secret_key = SecretKey::from_slice(&[0xcd; 32]).expect("valid secret key");
+    let public_key = secp256k1::PublicKey::from_secret_key(&secp, &secret_key);
+    let pubkey_bytes = public_key.serialize();
+
+    // scriptPubKey: <0x21> <pubkey 33 bytes> OP_CHECKSIGVERIFY
+    //               <0x21> <pubkey 33 bytes> OP_CHECKSIG
+    // OP_CHECKSIGVERIFY = 0xad, OP_CHECKSIG = 0xac
+    let mut lock_script_bytes = Vec::with_capacity(1 + 33 + 1 + 1 + 33 + 1);
+    lock_script_bytes.push(0x21);
+    lock_script_bytes.extend_from_slice(&pubkey_bytes);
+    lock_script_bytes.push(0xad);
+    lock_script_bytes.push(0x21);
+    lock_script_bytes.extend_from_slice(&pubkey_bytes);
+    lock_script_bytes.push(0xac);
+    let lock_script = transparent::Script::new(&lock_script_bytes);
+
+    let previous_output = transparent::Output {
+        value: 1_0000_0000u64.try_into().expect("valid amount"),
+        lock_script: lock_script.clone(),
+    };
+
+    // Placeholder V5 tx used to compute the sighash; the V5 (ZIP 244) sighash
+    // does not depend on the unlock script contents, so we can sign, then
+    // rebuild the transaction with the real unlock script.
+    let placeholder_tx = Transaction::V5 {
+        network_upgrade: NetworkUpgrade::Nu5,
+        lock_time: LockTime::unlocked(),
+        expiry_height: block::Height(0),
+        inputs: vec![transparent::Input::PrevOut {
+            outpoint: transparent::OutPoint {
+                hash: transaction::Hash([0u8; 32]),
+                index: 0,
+            },
+            unlock_script: transparent::Script::new(&[]),
+            sequence: u32::MAX,
+        }],
+        outputs: vec![transparent::Output {
+            value: 9000_0000u64.try_into().expect("valid amount"),
+            lock_script: transparent::Script::new(&[0x00]),
+        }],
+        sapling_shielded_data: None,
+        orchard_shielded_data: None,
+    };
+
+    let all_previous_outputs = Arc::new(vec![previous_output.clone()]);
+    let sighasher = SigHasher::new(&placeholder_tx, NetworkUpgrade::Nu5, all_previous_outputs)
+        .expect("sighasher creation should succeed");
+
+    // Canonical SIGHASH_ALL digest — this is the digest the attacker needs
+    // the stale C++ buffer to still hold when the second CHECKSIG runs.
+    let sighash = sighasher.sighash(HashType::ALL, Some((0, lock_script_bytes.clone())));
+    let msg = Message::from_digest(*sighash.as_ref());
+    let signature = secp.sign_ecdsa(&msg, &secret_key);
+    let der_sig = signature.serialize_der();
+
+    // scriptSig pushes:
+    //   1. <der_sig || 0x50>  (bottom)
+    //   2. <der_sig || 0x01>  (top, consumed by OP_CHECKSIGVERIFY first)
+    let mut unlock_script_bytes = Vec::new();
+    let sig_with_hashtype_len = (der_sig.len() + 1) as u8;
+
+    unlock_script_bytes.push(sig_with_hashtype_len);
+    unlock_script_bytes.extend_from_slice(&der_sig);
+    unlock_script_bytes.push(0x50);
+
+    unlock_script_bytes.push(sig_with_hashtype_len);
+    unlock_script_bytes.extend_from_slice(&der_sig);
+    unlock_script_bytes.push(0x01);
+
+    let final_tx = Transaction::V5 {
+        network_upgrade: NetworkUpgrade::Nu5,
+        lock_time: LockTime::unlocked(),
+        expiry_height: block::Height(0),
+        inputs: vec![transparent::Input::PrevOut {
+            outpoint: transparent::OutPoint {
+                hash: transaction::Hash([0u8; 32]),
+                index: 0,
+            },
+            unlock_script: transparent::Script::new(&unlock_script_bytes),
+            sequence: u32::MAX,
+        }],
+        outputs: vec![transparent::Output {
+            value: 9000_0000u64.try_into().expect("valid amount"),
+            lock_script: transparent::Script::new(&[0x00]),
+        }],
+        sapling_shielded_data: None,
+        orchard_shielded_data: None,
+    };
+
+    let verifier = super::CachedFfiTransaction::new(
+        Arc::new(final_tx),
+        Arc::new(vec![previous_output]),
+        NetworkUpgrade::Nu5,
+    )
+    .expect("network upgrade should be valid for v5 tx");
+
+    assert!(
+        verifier.is_valid(0).is_err(),
+        "V5 tx exploiting the stale libzcash_script sighash buffer via \
+         OP_CHECKSIGVERIFY + OP_CHECKSIG with an invalid second hash-type \
+         byte (0x50) must be rejected, matching zcashd"
+    );
 }

@@ -204,8 +204,9 @@ impl BlockTemplateLimits {
         //
         // Unpaid actions are always zero for transactions that pay the conventional fee,
         // so the unpaid action check always passes for those transactions.
+        let tx_block_sigops = tx.block_sigop_count();
         if tx.transaction.size > self.remaining_bytes
-            || tx.legacy_sigop_count > self.remaining_sigops
+            || tx_block_sigops > self.remaining_sigops
             || tx.unpaid_actions > self.remaining_unpaid_actions
             || orchard_actions > self.remaining_orchard_actions
             || sapling_ios > self.remaining_sapling_ios
@@ -216,7 +217,7 @@ impl BlockTemplateLimits {
         }
 
         self.remaining_bytes -= tx.transaction.size;
-        self.remaining_sigops -= tx.legacy_sigop_count;
+        self.remaining_sigops -= tx_block_sigops;
         self.remaining_unpaid_actions -= tx.unpaid_actions;
         self.remaining_orchard_actions -= orchard_actions;
         self.remaining_sapling_ios -= sapling_ios;
