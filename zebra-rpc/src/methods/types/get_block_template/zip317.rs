@@ -29,7 +29,7 @@ use zebra_node_services::mempool::TransactionDependencies;
 
 use crate::methods::types::transaction::TransactionTemplate;
 
-#[cfg(all(zcash_unstable = "nu7", feature = "tx_v6"))]
+#[cfg(any(all(zcash_unstable = "nu7", feature = "tx_v6"), zcash_unstable = "nsm"))]
 use crate::methods::Amount;
 
 #[cfg(all(zcash_unstable = "nu7", feature = "tx_v6"))]
@@ -253,7 +253,17 @@ pub fn fake_coinbase_transaction(
     // so one zat has the same size as the real amount:
     // https://developer.bitcoin.org/reference/transactions.html#txout-a-transaction-output
     let miner_fee = 1.try_into().expect("amount is valid and non-negative");
-    let outputs = standard_coinbase_outputs(net, height, miner_address, miner_fee);
+    // The LTS payout only affects the i64 amount in the miner's transparent
+    // output, not its serialized size or sigop count, so the fake coinbase
+    // used for transaction selection budgeting can ignore it.
+    let outputs = standard_coinbase_outputs(
+        net,
+        height,
+        miner_address,
+        miner_fee,
+        #[cfg(zcash_unstable = "nsm")]
+        Amount::zero(),
+    );
 
     let network_upgrade = NetworkUpgrade::current(net, height);
 

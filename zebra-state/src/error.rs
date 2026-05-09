@@ -6,6 +6,8 @@ use chrono::{DateTime, Utc};
 use derive_new::new;
 use thiserror::Error;
 
+#[cfg(zcash_unstable = "nsm")]
+use zebra_chain::amount::Amount;
 use zebra_chain::{
     amount::{self, NegativeAllowed, NonNegative},
     block,
@@ -337,6 +339,18 @@ pub enum ValidateContextError {
         chain_value_pools: Box<ValueBalance<NonNegative>>,
         block_value_pool_change: Box<ValueBalance<NegativeAllowed>>,
         height: Option<block::Height>,
+    },
+
+    #[cfg(zcash_unstable = "nsm")]
+    #[error(
+        "invalid LTS (NSM) payout claimed at {height:?}: \
+         expected {expected:?}, actual {actual:?}"
+    )]
+    #[non_exhaustive]
+    InvalidLtsPayout {
+        height: block::Height,
+        expected: Amount<NonNegative>,
+        actual: Amount<NonNegative>,
     },
 
     #[error("error updating a note commitment tree: {0}")]
