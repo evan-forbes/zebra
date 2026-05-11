@@ -79,6 +79,7 @@ proptest-derive = { workspace = true, optional = true }
 [dev-dependencies]
 color-eyre = { workspace = true }
 
+criterion = { workspace = true, features = ["html_reports"] }
 hex = { workspace = true }
 num-integer = { workspace = true }
 proptest = { workspace = true }
@@ -92,6 +93,10 @@ tracing-subscriber = { workspace = true }
 zebra-state = { path = "../zebra-state", version = "5.0.0", features = ["proptest-impl"] }
 zebra-chain = { path = "../zebra-chain", version = "6.0.1", features = ["proptest-impl"] }
 zebra-test = { path = "../zebra-test/", version = "3.0.0" }
+
+[[bench]]
+name = "worst_case_tx_verification"
+harness = false
 
 [lints]
 workspace = true
