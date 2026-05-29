@@ -48,9 +48,6 @@ pub const DEFAULT_ENABLED_TABLES: &[&str] = &[
     "peer_message",
     "peer_lifecycle",
     "peer_session",
-    "send_timing",
-    "serving_event",
-    "trace_dropped",
 ];
 
 /// Returns the process-wide node identifier used to tag JSONL trace records.
