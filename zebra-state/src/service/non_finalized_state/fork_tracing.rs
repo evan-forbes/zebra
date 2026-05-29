@@ -51,7 +51,7 @@ pub(super) struct ForkChainSnapshot {
 pub(super) enum ForkTraceCause {
     CommitBlock { committed_tip_hash: block::Hash },
     CommitNewChain { committed_tip_hash: block::Hash },
-    Finalize { finalized_tip_hash: block::Hash },
+    Finalize,
     InvalidateBlock { invalidated_hash: block::Hash },
     ReconsiderBlock { reconsidered_hash: block::Hash },
 }
@@ -493,7 +493,7 @@ impl ForkTraceCause {
         match self {
             Self::CommitBlock { .. } => "commit_block",
             Self::CommitNewChain { .. } => "commit_new_chain",
-            Self::Finalize { .. } => "finalize",
+            Self::Finalize => "finalize",
             Self::InvalidateBlock { .. } => "invalidate_block",
             Self::ReconsiderBlock { .. } => "reconsider_block",
         }
@@ -503,16 +503,14 @@ impl ForkTraceCause {
         match self {
             Self::CommitBlock { committed_tip_hash }
             | Self::CommitNewChain { committed_tip_hash } => Some(committed_tip_hash),
-            Self::Finalize { .. } | Self::InvalidateBlock { .. } | Self::ReconsiderBlock { .. } => {
-                None
-            }
+            Self::Finalize | Self::InvalidateBlock { .. } | Self::ReconsiderBlock { .. } => None,
         }
     }
 
     fn prune_reason(self) -> &'static str {
         match self {
             Self::CommitBlock { .. } | Self::CommitNewChain { .. } => "max_chain_limit",
-            Self::Finalize { .. } => "finalized_root_mismatch",
+            Self::Finalize => "finalized_root_mismatch",
             Self::InvalidateBlock { .. } => "block_invalidated",
             Self::ReconsiderBlock { .. } => "reconsidered_branch_replaced",
         }
@@ -526,12 +524,12 @@ impl ForkTraceCause {
             Self::ReconsiderBlock { reconsidered_hash } => {
                 Some(("block_reconsidered", reconsidered_hash))
             }
-            Self::CommitBlock { .. } | Self::CommitNewChain { .. } | Self::Finalize { .. } => None,
+            Self::CommitBlock { .. } | Self::CommitNewChain { .. } | Self::Finalize => None,
         }
     }
 
     fn is_finalize(self) -> bool {
-        matches!(self, Self::Finalize { .. })
+        matches!(self, Self::Finalize)
     }
 }
 

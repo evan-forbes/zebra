@@ -358,12 +358,7 @@ impl NonFinalizedState {
 
         self.update_metrics_for_chains();
 
-        self.trace_fork_state_change(
-            &before,
-            ForkTraceCause::Finalize {
-                finalized_tip_hash: best_chain_root.hash,
-            },
-        );
+        self.trace_fork_state_change(&before, ForkTraceCause::Finalize);
 
         // Add the treestate to the finalized block.
         FinalizableBlock::new(best_chain_root, root_treestate)

@@ -175,6 +175,7 @@ indexmap = { workspace = true }
 lazy_static = { workspace = true }
 semver = { workspace = true }
 serde = { workspace = true, features = ["serde_derive"] }
+serde_json = { workspace = true, features = ["preserve_order"] }
 toml = { workspace = true }
 
 futures = { workspace = true }
@@ -274,8 +275,6 @@ hyper-util = { workspace = true }
 strum = { workspace = true }
 strum_macros = { workspace = true }
 
-# zebra-rpc needs the preserve_order feature, it also makes test results more stable
-serde_json = { workspace = true, features = ["preserve_order"] }
 tempfile = { workspace = true }
 
 hyper = { workspace = true, features = ["http1", "http2", "server"] }

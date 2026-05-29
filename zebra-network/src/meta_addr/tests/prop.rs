@@ -205,6 +205,15 @@ proptest! {
         let chrono_now = Utc::now();
 
         for change in changes {
+            if matches!(change, MetaAddrChange::UpdateSelfConnection { .. }) {
+                prop_assert_eq!(
+                    change.apply_to_meta_addr(None, instant_now, chrono_now),
+                    None,
+                    "self-connection updates should not create new address book entries",
+                );
+                continue;
+            }
+
             // Check direct application
             let new_addr = change.apply_to_meta_addr(None, instant_now, chrono_now);
 
